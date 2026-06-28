@@ -1,0 +1,4 @@
+The embedded UI font is DejaVu Sans Mono (assets/DejaVuSansMono.ttf), released
+under the DejaVu Fonts License (a permissive, Bitstream-Vera-derived license that
+explicitly permits embedding and redistribution). See:
+  https://dejavu-fonts.github.io/License.html

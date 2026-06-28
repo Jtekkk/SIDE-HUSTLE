@@ -46,9 +46,16 @@ Requires a C++23 compiler (GCC 13+ or Clang 17+).
 
 ### Graphical version (raylib)
 
-The GUI build links **raylib statically**, so on Windows it's a single
-self-contained `.exe` (no DLLs). raylib's prebuilt static libs aren't committed —
-fetch them once, then build:
+The renderer features 2.5D wall blocks with bevels and drop shadows, per-tile
+floor variation + ambient occlusion, a smooth fractional-scroll camera, tweened
+entity movement with idle-bob, soft dynamic lighting + an edge vignette, a
+particle system (hit sparks, coin/level-up bursts), floating damage numbers, and
+crisp embedded-TrueType text. Monsters and items are drawn as shaped, shaded
+sprites with outlines and eyes.
+
+The GUI build links **raylib statically** and embeds its font, so on Windows it's
+a single self-contained `.exe` (no DLLs, no asset files). raylib's prebuilt
+static libs aren't committed — fetch them once, then build:
 
 ```sh
 scripts/fetch-raylib.sh     # downloads raylib 5.5 libs into third_party/
