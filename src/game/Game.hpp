@@ -29,10 +29,43 @@ struct Config {
 
 class Game {
 public:
+    // A single player intent. Front-ends (terminal or graphical) translate
+    // their input into a Command and call advance().
+    enum class Command {
+        None, Wait, Descend, UseCoffee,
+        MoveW, MoveE, MoveN, MoveS, MoveNW, MoveNE, MoveSW, MoveSE,
+    };
+
     explicit Game(Config config);
 
     int run();       // interactive play in a raw terminal
     int selftest();  // headless: auto-plays floors and prints a report
+
+    // Apply one player command and (if it consumed a turn) resolve the monster
+    // turn, refresh field-of-view, and record the score on death/win. Returns
+    // true if a turn was consumed. This is the entry point for the GUI.
+    bool advance(Command cmd);
+
+    // ---- read-only view of the simulation, for front-ends -------------------
+    [[nodiscard]] const Map& map() const { return map_; }
+    [[nodiscard]] const Entity& player() const { return player_; }
+    [[nodiscard]] const std::vector<Entity>& monsters() const { return monsters_; }
+    [[nodiscard]] const std::vector<Item>& items() const { return items_; }
+    [[nodiscard]] Vec2 stairs() const { return stairs_; }
+    [[nodiscard]] int depth() const { return depth_; }
+    [[nodiscard]] int level() const { return level_; }
+    [[nodiscard]] int xp() const { return xp_; }
+    [[nodiscard]] int xp_next() const { return xp_next_; }
+    [[nodiscard]] int cash() const { return cash_; }
+    [[nodiscard]] int coffees() const { return coffees_; }
+    [[nodiscard]] int fov_radius() const { return fov_radius_; }
+    [[nodiscard]] int score() const;
+    [[nodiscard]] bool is_playing() const { return state_ == State::Playing; }
+    [[nodiscard]] bool is_dead() const { return state_ == State::Dead; }
+    [[nodiscard]] bool is_won() const { return state_ == State::Won; }
+    [[nodiscard]] const std::deque<std::string>& messages() const { return log_; }
+    [[nodiscard]] const HighScores& high_scores() const { return high_scores_; }
+    [[nodiscard]] const char* difficulty_name() const;
 
 private:
     enum class State { Playing, Dead, Won };
@@ -52,12 +85,12 @@ private:
     void player_gain_xp(int xp);
     void descend();
     void record_score();
+    bool apply_command(Command cmd);      // player half of a turn
 
     // --- queries -------------------------------------------------------------
     Entity* monster_at(Vec2 p);
     Item* item_at(Vec2 p);
     void log(std::string message);
-    [[nodiscard]] int score() const;
 
     // --- rendering -----------------------------------------------------------
     [[nodiscard]] std::string render_title() const;

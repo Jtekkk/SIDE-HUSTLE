@@ -1,23 +1,28 @@
 # SIDE HUSTLE
 
-A terminal roguelike written in **modern C++ (C++23)**. You're a freelancer
-descending a procedurally generated *corporate dungeon* — fight Bugs, Needy
-Clients, Recruiters and Middle Managers, grab cash and coffee, level up, and
-escape through eight floors to go full-time on your side hustle.
+A roguelike written in **modern C++ (C++23)**. You're a freelancer descending a
+procedurally generated *corporate dungeon* — fight Bugs, Needy Clients,
+Recruiters and Middle Managers, grab cash and coffee, level up, and escape
+through eight floors (past the CEO) to go full-time on your side hustle.
 
-It runs anywhere a terminal does — **no external dependencies**, just the C++
-standard library and POSIX.
+It ships in **two front-ends over one shared engine**:
+
+- a **graphical** version (GPU-rendered window via [raylib](https://www.raylib.com/)), and
+- a **terminal** version (truecolor ANSI, runs anywhere a terminal does — no deps).
+
+![SIDE HUSTLE — graphical version](docs/screenshot.png)
+
+The same `sh::Game` simulation drives both; the front-ends are pure view + input
+layers (see `src/game/Game.hpp`'s read-only API and `advance()`).
+
+The terminal version, for comparison:
 
 ```
   SIDE HUSTLE — a corporate dungeon crawl
   #######  ############
   #.....#  #..........#
   #.....####..........####      .
-  #......................    ....
-  #.....####..........#####......
   ###....................@M......
-    ##.#####..........#####......
-     #.#   ############      ....
 HP [##########----------] 18/30   Floor 2   Lvl 2 (xp 4/30)   $44
 ```
 
@@ -38,6 +43,24 @@ make selftest   # headless self-play smoke test
 ```
 
 Requires a C++23 compiler (GCC 13+ or Clang 17+).
+
+### Graphical version (raylib)
+
+The GUI build links **raylib statically**, so on Windows it's a single
+self-contained `.exe` (no DLLs). raylib's prebuilt static libs aren't committed —
+fetch them once, then build:
+
+```sh
+scripts/fetch-raylib.sh     # downloads raylib 5.5 libs into third_party/
+
+make gui                    # -> ./side-hustle-gui      (Linux window)
+make windows-gui            # -> ./side-hustle-gui.exe  (Windows, single file)
+```
+
+Same controls as below, plus: choose a difficulty on the title screen, and press
+**Enter** on the stairs to descend. A virtual-framebuffer smoke test is built in:
+`SH_SMOKE=120 ./side-hustle-gui` auto-plays ~120 frames and exits (used to
+validate the render loop headlessly).
 
 ### Windows
 

@@ -206,7 +206,7 @@ void Game::spawn_monsters(const std::vector<Room>& rooms) {
     // The CEO waits by the exit on the deepest floor.
     if (depth_ >= kMaxDepth && monster_at(stairs_) == nullptr) {
         monsters_.push_back(make_boss(stairs_, config_.difficulty));
-        log("\x1b[95mYou sense the CEO guarding the way out (&).\x1b[0m");
+        log("You sense the CEO guarding the way out (&).");
     }
 }
 
@@ -349,7 +349,8 @@ void Game::monsters_turn() {
 void Game::attack(Entity& attacker, Entity& defender) {
     const int dmg = std::max(1, attacker.combat.attack - defender.combat.defense + rng_.range(-1, 1));
     defender.combat.hp -= dmg;
-    log(std::format("{} hits {} for {} damage.", attacker.name, defender.name, dmg));
+    const char* verb = (&attacker == &player_) ? "hit" : "hits";
+    log(std::format("{} {} {} for {} damage.", attacker.name, verb, defender.name, dmg));
 
     if (defender.combat.hp > 0) return;
 
@@ -391,6 +392,52 @@ void Game::descend() {
 // ---------------------------------------------------------------------------
 // Queries
 // ---------------------------------------------------------------------------
+
+bool Game::apply_command(Command cmd) {
+    switch (cmd) {
+        case Command::MoveW:  return try_move_player({-1, 0});
+        case Command::MoveE:  return try_move_player({1, 0});
+        case Command::MoveN:  return try_move_player({0, -1});
+        case Command::MoveS:  return try_move_player({0, 1});
+        case Command::MoveNW: return try_move_player({-1, -1});
+        case Command::MoveNE: return try_move_player({1, -1});
+        case Command::MoveSW: return try_move_player({-1, 1});
+        case Command::MoveSE: return try_move_player({1, 1});
+        case Command::Wait:      return true;
+        case Command::UseCoffee: return use_coffee();
+        case Command::Descend:
+            if (player_.pos == stairs_) {
+                descend();
+            } else {
+                log("There are no stairs here.");
+            }
+            return false; // descending starts a fresh floor; no monster turn
+        case Command::None:
+        default:
+            return false;
+    }
+}
+
+bool Game::advance(Command cmd) {
+    if (state_ != State::Playing) return false;
+
+    const bool acted = apply_command(cmd);
+    if (acted && state_ == State::Playing) {
+        monsters_turn();
+        compute_fov(map_, player_.pos, fov_radius_);
+    }
+    if (state_ != State::Playing) record_score();
+    return acted;
+}
+
+const char* Game::difficulty_name() const {
+    switch (config_.difficulty) {
+        case Difficulty::Easy: return "Easy";
+        case Difficulty::Hard: return "Hard";
+        case Difficulty::Normal: break;
+    }
+    return "Normal";
+}
 
 Entity* Game::monster_at(Vec2 p) {
     for (auto& m : monsters_) {

@@ -3,7 +3,15 @@
 *.o
 *.obj
 side-hustle
+side-hustle-gui
 *.exe
+
+# raylib static libs are fetched via scripts/fetch-raylib.sh (headers are committed)
+third_party/raylib/lib/linux/libraylib.a
+third_party/raylib/lib/win64/libraylib.a
+
+# raylib screenshots from the smoke test
+sh_*.png
 
 # Runtime data
 side-hustle-scores.txt
