@@ -215,6 +215,7 @@ Color code_color(int code) {
         case 32: return C(104, 210, 104);
         case 33: return C(238, 202, 84);
         case 35: return C(208, 120, 208);
+        case 94: return C(150, 140, 255);
         case 36: return C(98, 208, 218);
         case 91: return C(255, 100, 100);
         case 93: return C(255, 226, 122);
@@ -472,6 +473,26 @@ void draw_barrel(Vector2 c) {
     DrawCircleV({c.x, c.y - kTile * 0.02f}, 3.5f, C(235, 180, 60)); // hazard mark
 }
 
+void draw_crate(Vector2 c) {
+    shadow(c);
+    const Rectangle box{c.x - kTile * 0.28f, c.y - kTile * 0.28f, kTile * 0.56f, kTile * 0.56f};
+    DrawRectangleRounded(box, 0.1f, 4, C(146, 112, 72));
+    DrawRectangleRounded({box.x, box.y, box.width * 0.5f, box.height}, 0.1f, 4, C(164, 128, 86));
+    DrawLineEx({box.x, box.y}, {box.x + box.width, box.y + box.height}, 2, C(108, 80, 48));
+    DrawLineEx({box.x + box.width, box.y}, {box.x, box.y + box.height}, 2, C(108, 80, 48));
+    DrawRectangleRoundedLines(box, 0.1f, 4, C(94, 68, 40));
+}
+
+void draw_projectile(Vector2 c, Vector2 dir) {
+    // motion-blur trail behind a glowing orb
+    BeginBlendMode(BLEND_ADDITIVE);
+    for (int i = 1; i <= 3; ++i)
+        DrawCircleV({c.x - dir.x * i * 6.0f, c.y - dir.y * i * 6.0f}, 5.0f - i, Fade(C(170, 160, 255), 0.3f / i));
+    DrawCircleV(c, 6.0f, Fade(C(210, 205, 255), 0.9f));
+    EndBlendMode();
+    DrawCircleV(c, 3.5f, C(235, 232, 255));
+}
+
 // ---- entities (albedo shapes; lights are added separately) -----------------
 void shadow(Vector2 c) { DrawEllipse((int)c.x, (int)(c.y + kTile * 0.30f), kTile * 0.30f, kTile * 0.12f, Fade(BLACK, 0.40f)); }
 void eyes(Vector2 c, float dx, float dy, float r) {
@@ -523,8 +544,27 @@ void draw_monster(const sh::Entity& m, Vector2 c, float bob, float punch) {
             DrawRectangleRoundedLines(r, 0.25f, 6, dark);
             eyes(c, 6, 3, 3); break;
         }
+        case sh::MonsterKind::Phisher: {
+            // a hovering drone with an antenna
+            DrawPoly(c, 3, kTile * 0.30f, a_time_rot() * 0.5f + 90.0f, col);
+            DrawPolyLines(c, 3, kTile * 0.30f, a_time_rot() * 0.5f + 90.0f, dark);
+            DrawCircleV(c, kTile * 0.12f, lite);
+            DrawLineEx({c.x, c.y - kTile * 0.22f}, {c.x, c.y - kTile * 0.40f}, 2, dark);
+            DrawCircleV({c.x, c.y - kTile * 0.42f}, 2.5f, C(255, 120, 120));
+            eyes(c, 4, 1, 2.5f); break;
+        }
     }
     if (punch > 0.0f) DrawCircleV(c, kTile * 0.34f, Fade(WHITE, 0.6f * punch));
+    // status: burning embers / stun swirl
+    if (m.burn > 0)
+        for (int i = 0; i < 3; ++i)
+            DrawCircleV({c.x + std::sin(a_time_rot() * 0.3f + i * 2.1f) * 8.0f, c.y - 12.0f - (float)((int)(a_time_rot() * 4 + i * 9) % 14)},
+                        2.0f, Fade(C(255, 150, 50), 0.8f));
+    if (m.stun > 0)
+        for (int i = 0; i < 3; ++i) {
+            const float an = a_time_rot() * 0.2f + i * 2.094f;
+            DrawCircleV({c.x + std::cos(an) * 11.0f, c.y - kTile * 0.34f + std::sin(an) * 4.0f}, 2.0f, C(255, 230, 120));
+        }
 }
 void draw_item(const sh::Item& it, Vector2 c, float bob) {
     c.y += bob;
@@ -649,8 +689,8 @@ void draw_hud(const Game& g, const Anim& a, int x, int w, int h) {
     int cy = h - 86;
     DrawLine(ix, cy - 12, x + w - 22, cy - 12, C(54, 58, 78));
     const Color hc = C(120, 128, 150);
-    dt("Move  WASD / Arrows / HJKL", ix, cy, 14, hc);
-    dt("Diagonals  Y U B N", ix, cy + 19, 14, hc);
+    dt("Move WASD/Arrows/HJKL   Diag YUBN", ix, cy, 14, hc);
+    dt("Shove  Shift + direction (knock / push)", ix, cy + 19, 14, hc);
     dt("Coffee E   Wait .   Descend Enter", ix, cy + 38, 14, hc);
     dt("Quit  Q", ix, cy + 57, 14, hc);
     EndScissorMode();
@@ -691,6 +731,17 @@ Game::Command dir_to_cmd(Vec2 d) {
     if (d.x > 0) return Game::Command::MoveE;
     if (d.y < 0) return Game::Command::MoveN;
     if (d.y > 0) return Game::Command::MoveS;
+    return Game::Command::None;
+}
+Game::Command shove_to_cmd(Vec2 d) {
+    if (d.x < 0 && d.y < 0) return Game::Command::ShoveNW;
+    if (d.x > 0 && d.y < 0) return Game::Command::ShoveNE;
+    if (d.x < 0 && d.y > 0) return Game::Command::ShoveSW;
+    if (d.x > 0 && d.y > 0) return Game::Command::ShoveSE;
+    if (d.x < 0) return Game::Command::ShoveW;
+    if (d.x > 0) return Game::Command::ShoveE;
+    if (d.y < 0) return Game::Command::ShoveN;
+    if (d.y > 0) return Game::Command::ShoveS;
     return Game::Command::None;
 }
 
@@ -874,9 +925,13 @@ int main() {
             else if (IsKeyPressed(KEY_PERIOD) || IsKeyPressed(KEY_SPACE)) cmd = Game::Command::Wait;
             else {
                 const Vec2 d = movement_dir();
+                const bool shoving = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
                 move_timer -= dt;
                 if (d.x == 0 && d.y == 0) move_timer = 0.0f;
-                else if (move_timer <= 0.0f) { cmd = dir_to_cmd(d); move_timer = kMoveRepeat; }
+                else if (move_timer <= 0.0f) {
+                    cmd = shoving ? shove_to_cmd(d) : dir_to_cmd(d);
+                    move_timer = kMoveRepeat;
+                }
             }
             if (IsKeyPressed(KEY_Q)) quit = true;
             const int before = game->player().combat.hp;
@@ -931,7 +986,9 @@ int main() {
                 }
             for (const auto& pr : game->props()) {
                 if (!pr.alive || !game->map().in_bounds(pr.pos) || !game->map().at(pr.pos).explored) continue;
-                draw_barrel(tile_center(pr.pos.x, pr.pos.y, camx, camy));
+                const Vector2 c = tile_center(pr.pos.x, pr.pos.y, camx, camy);
+                if (pr.kind == sh::PropKind::Barrel) draw_barrel(c);
+                else draw_crate(c);
             }
             for (const auto& it : game->items()) {
                 if (it.taken || !game->map().in_bounds(it.pos) || !game->map().at(it.pos).visible) continue;
@@ -1002,8 +1059,12 @@ int main() {
             if (game->map().in_bounds(game->stairs()) && game->map().at(game->stairs()).visible)
                 add_light(tile_center(game->stairs().x, game->stairs().y, camx, camy), kTile * 1.3f, C(255, 220, 110), 0.45f);
             for (const auto& pr : game->props())
-                if (pr.alive && game->map().in_bounds(pr.pos) && game->map().at(pr.pos).visible)
+                if (pr.alive && pr.kind == sh::PropKind::Barrel && game->map().in_bounds(pr.pos) &&
+                    game->map().at(pr.pos).visible)
                     add_light(tile_center(pr.pos.x, pr.pos.y, camx, camy), kTile * 0.7f, C(255, 168, 66), 0.22f);
+            for (const auto& pj : game->projectiles())
+                if (game->map().in_bounds(pj.pos) && game->map().at(pj.pos).visible)
+                    add_light(tile_center(pj.pos.x, pj.pos.y, camx, camy), kTile * 0.8f, C(150, 140, 255), 0.5f);
             for (const auto& m : mons) {
                 if (m.alive && m.glyph == '&' && game->map().at(m.pos).visible)
                     add_light(tile_center(m.pos.x, m.pos.y, camx, camy), kTile * 1.5f, code_color(m.color), 0.45f);
@@ -1159,6 +1220,17 @@ int main() {
             rlTranslatef(sx, sy, 0);
             draw_player(tile_center(anim.playerR.x, anim.playerR.y, camx, camy), std::sin(anim.time * 3.0f) * 1.4f,
                         anim.playerPunch, anim.playerLunge, anim.playerLungeDir);
+            for (const auto& pj : game->projectiles())
+                if (game->map().in_bounds(pj.pos) && game->map().at(pj.pos).visible)
+                    draw_projectile(tile_center(pj.pos.x, pj.pos.y, camx, camy),
+                                    {(float)pj.dir.x, (float)pj.dir.y});
+            if (game->player().burn > 0) {
+                const Vector2 pc = tile_center(anim.playerR.x, anim.playerR.y, camx, camy);
+                for (int i = 0; i < 3; ++i)
+                    DrawCircleV({pc.x + std::sin(a_time_rot() * 0.3f + i * 2.1f) * 8.0f,
+                                 pc.y - 12.0f - (float)((int)(a_time_rot() * 4 + i * 9) % 14)},
+                                2.0f, Fade(C(255, 150, 50), 0.85f));
+            }
             draw_particles();
             draw_floats();
             rlPopMatrix();
@@ -1210,6 +1282,23 @@ int main() {
                 if (saw) { TakeScreenshot("sh_haz.png"); haz_shot = true; }
             }
             if (!boom_shot && anim.boom > 0.45f) { TakeScreenshot("sh_boom.png"); boom_shot = true; }
+            static bool proj_shot = false, new_shot = false;
+            if (!proj_shot && phase == Phase::Playing && game) {
+                for (const auto& pj : game->projectiles())
+                    if (game->map().in_bounds(pj.pos) && game->map().at(pj.pos).visible) {
+                        TakeScreenshot("sh_proj.png"); proj_shot = true; break;
+                    }
+            }
+            if (!new_shot && phase == Phase::Playing && game) {
+                bool saw = false;
+                for (const auto& m : game->monsters())
+                    if (m.alive && m.kind == sh::MonsterKind::Phisher && game->map().in_bounds(m.pos) &&
+                        game->map().at(m.pos).visible) { saw = true; break; }
+                for (const auto& pr : game->props())
+                    if (!saw && pr.alive && pr.kind == sh::PropKind::Crate && game->map().in_bounds(pr.pos) &&
+                        game->map().at(pr.pos).visible) { saw = true; break; }
+                if (saw) { TakeScreenshot("sh_new.png"); new_shot = true; }
+            }
             if (frame == smoke_frames - 1) TakeScreenshot("sh_final.png");
         }
         if (quit) break;

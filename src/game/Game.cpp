@@ -51,6 +51,8 @@ int dir_to_key(Vec2 d) {
     return '.';
 }
 
+Vec2 unit_dir(Vec2 d) { return {(d.x > 0) - (d.x < 0), (d.y > 0) - (d.y < 0)}; }
+
 // Difficulty tunes how hard monsters hit and how much HP they bring.
 double monster_scale(Difficulty d) {
     switch (d) {
@@ -66,28 +68,36 @@ Entity make_monster(Vec2 pos, int depth, Rng& rng, Difficulty diff) {
     e.pos = pos;
     e.faction = Faction::Monster;
 
-    const int roll = rng.range(0, 9) + depth;
-    if (roll < 4) {
-        e.kind = MonsterKind::Bug;
-        e.glyph = 'b'; e.color = 32; e.name = "a Bug";
-        e.combat = {6, 6, 3, 0}; e.xp_reward = 6;
-    } else if (roll < 8) {
-        e.kind = MonsterKind::Client;
-        e.glyph = 'c'; e.color = 31; e.name = "a Needy Client";
-        e.combat = {12, 12, 4, 1}; e.xp_reward = 12;
-    } else if (roll < 12) {
-        e.kind = MonsterKind::Recruiter;
-        e.glyph = 'r'; e.color = 35; e.name = "a Recruiter";
-        e.combat = {18, 18, 6, 1}; e.xp_reward = 20;
+    if (depth >= 2 && rng.chance(0.22)) {
+        // a ranged spammer that kites and fires projectiles
+        e.kind = MonsterKind::Phisher;
+        e.glyph = 'p'; e.color = 94; e.name = "a Phisher";
+        e.combat = {8, 8, 3, 0}; e.xp_reward = 18;
     } else {
-        e.kind = MonsterKind::Manager;
-        e.glyph = 'M'; e.color = 91; e.name = "a Middle Manager";
-        e.combat = {28, 28, 8, 2}; e.xp_reward = 35;
+        const int roll = rng.range(0, 9) + depth;
+        if (roll < 4) {
+            e.kind = MonsterKind::Bug;
+            e.glyph = 'b'; e.color = 32; e.name = "a Bug";
+            e.combat = {6, 6, 3, 0}; e.xp_reward = 6;
+        } else if (roll < 8) {
+            e.kind = MonsterKind::Client;
+            e.glyph = 'c'; e.color = 31; e.name = "a Needy Client";
+            e.combat = {12, 12, 4, 1}; e.xp_reward = 12;
+        } else if (roll < 12) {
+            e.kind = MonsterKind::Recruiter;
+            e.glyph = 'r'; e.color = 35; e.name = "a Recruiter";
+            e.combat = {18, 18, 6, 1}; e.xp_reward = 20;
+        } else {
+            e.kind = MonsterKind::Manager;
+            e.glyph = 'M'; e.color = 91; e.name = "a Middle Manager";
+            e.combat = {28, 28, 8, 2}; e.xp_reward = 35;
+        }
     }
 
     // Physics: heavier foes resist knockback and shove harder.
     switch (e.kind) {
         case MonsterKind::Bug:       e.weight = 0; e.force = 1; break;
+        case MonsterKind::Phisher:   e.weight = 1; e.force = 1; break;
         case MonsterKind::Client:    e.weight = 1; e.force = 2; break;
         case MonsterKind::Recruiter: e.weight = 2; e.force = 2; break;
         case MonsterKind::Manager:   e.weight = 3; e.force = 3; break;
@@ -130,6 +140,7 @@ ansi::Rgb code_to_rgb(int code) {
         case 32: return {90, 200, 90};    // bug
         case 33: return {235, 200, 80};   // cash
         case 35: return {200, 110, 200};  // recruiter
+        case 94: return {150, 140, 255};  // phisher
         case 36: return {90, 205, 215};   // coffee
         case 91: return {255, 95, 95};    // manager
         case 95: return {240, 120, 240};  // CEO
@@ -195,7 +206,9 @@ void Game::new_floor(int depth) {
     monsters_.clear();
     items_.clear();
     props_.clear();
+    projectiles_.clear();
     for (const Vec2 b : dungeon.barrels) props_.push_back(Prop{b, PropKind::Barrel, true});
+    for (const Vec2 cr : dungeon.crates) props_.push_back(Prop{cr, PropKind::Crate, true});
     spawn_monsters(dungeon.rooms);
     spawn_items(dungeon.rooms);
 
@@ -258,11 +271,18 @@ bool Game::handle_key(int key) {
     if (const auto dir = key_to_dir(key)) return try_move_player(*dir);
 
     switch (key) {
+        case 'H': return shove({-1, 0});
+        case 'L': return shove({1, 0});
+        case 'K': return shove({0, -1});
+        case 'J': return shove({0, 1});
+        case 'Y': return shove({-1, -1});
+        case 'U': return shove({1, -1});
+        case 'B': return shove({-1, 1});
+        case 'N': return shove({1, 1});
         case '.':
         case ' ':
             return true; // wait a turn
         case 'e':
-        case 'E':
             return use_coffee();
         case '>':
             if (player_.pos == stairs_) {
@@ -345,6 +365,11 @@ bool Game::use_coffee() {
 }
 
 void Game::monsters_turn() {
+    // Move shots already in flight first, so a shot fired this turn waits a turn
+    // before travelling — giving the player a chance to see and dodge it.
+    advance_projectiles();
+    if (state_ != State::Playing) return;
+
     std::vector<Vec2> occupied;
     occupied.reserve(monsters_.size() + props_.size());
     for (const auto& m : monsters_) if (m.alive) occupied.push_back(m.pos);
@@ -352,16 +377,45 @@ void Game::monsters_turn() {
 
     for (auto& m : monsters_) {
         if (!m.alive || state_ != State::Playing) continue;
+        if (tick_status(m)) continue;                     // burning / stunned -> skip
+        if (!m.alive || state_ != State::Playing) continue; // burn may have finished it
 
         const int dist = m.pos.chebyshev(player_.pos);
+        const bool aware = map_.in_bounds(m.pos) && map_.at(m.pos).visible && dist <= 12;
+
+        // Phisher: a ranged kiter that lines up shots and backs away up close.
+        if (m.kind == MonsterKind::Phisher) {
+            if (dist <= 1) {
+                const Vec2 away = unit_dir(m.pos - player_.pos);
+                const Vec2 dest = m.pos + away;
+                if (map_.walkable(dest) && dest != player_.pos && !monster_at(dest) && !prop_at(dest)) {
+                    m.pos = dest;
+                    enter_tile(m);
+                } else {
+                    attack(m, player_);
+                }
+                continue;
+            }
+            const Vec2 d = player_.pos - m.pos;
+            const bool aligned = (d.x == 0 || d.y == 0 || std::abs(d.x) == std::abs(d.y));
+            if (aware && aligned && dist <= 7) {
+                fire_projectile(m, unit_dir(d));
+            } else if (aware) {
+                if (const auto step = next_step_towards(map_, m.pos, player_.pos, occupied)) {
+                    if (*step != player_.pos && !monster_at(*step) && !prop_at(*step)) {
+                        m.pos = *step;
+                        enter_tile(m);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Melee monsters.
         if (dist <= 1) {
             attack(m, player_);
             continue;
         }
-
-        // A monster reacts only while it stands on a tile the player can see
-        // (line-of-sight is symmetric), otherwise it idly mills about.
-        const bool aware = map_.in_bounds(m.pos) && map_.at(m.pos).visible && dist <= 12;
         if (aware) {
             if (const auto step = next_step_towards(map_, m.pos, player_.pos, occupied)) {
                 if (*step != player_.pos && !monster_at(*step) && !prop_at(*step)) {
@@ -382,10 +436,6 @@ void Game::monsters_turn() {
             }
         }
     }
-}
-
-namespace {
-Vec2 unit_dir(Vec2 d) { return {(d.x > 0) - (d.x < 0), (d.y > 0) - (d.y < 0)}; }
 }
 
 void Game::attack(Entity& attacker, Entity& defender) {
@@ -448,10 +498,16 @@ void Game::apply_knockback(Entity& target, Vec2 dir, int power) {
         const Vec2 next = target.pos + dir;
         if (!map_.in_bounds(next) || map_.is_wall(next)) {
             damage(target, remaining * 3, std::format("{} slams into the wall.", target.name));
+            if (remaining >= 2 && &target != &player_ && target.alive) target.stun = std::max(target.stun, 1);
             return;
         }
-        if (Prop* barrel = prop_at(next)) {
-            explode_barrel(*barrel);
+        if (Prop* pr = prop_at(next)) {
+            if (pr->kind == PropKind::Barrel) {
+                explode_barrel(*pr);
+            } else { // crate: a hard, dazing stop
+                damage(target, remaining * 2, std::format("{} slams into a crate.", target.name));
+                if (remaining >= 2 && &target != &player_ && target.alive) target.stun = std::max(target.stun, 1);
+            }
             return;
         }
         if (Entity* other = entity_at(next, &target)) {
@@ -486,6 +542,7 @@ void Game::explode_barrel(Prop& barrel) {
         if ((&e != &player_ && !e.alive) || e.pos.chebyshev(c) > 2) return;
         damage(e, 12);
         if (e.alive) {
+            e.burn = std::max(e.burn, 2); // the blast sets them alight
             const Vec2 d = unit_dir(e.pos - c);
             apply_knockback(e, (d.x == 0 && d.y == 0) ? Vec2{1, 0} : d, 2);
         }
@@ -493,9 +550,11 @@ void Game::explode_barrel(Prop& barrel) {
     blast(player_);
     for (auto& m : monsters_) blast(m);
 
-    // Chain to nearby barrels.
+    // Chain to nearby barrels (and shatter nearby crates).
     for (auto& pr : props_) {
-        if (pr.alive && pr.pos.chebyshev(c) <= 2) explode_barrel(pr);
+        if (!pr.alive || pr.pos.chebyshev(c) > 2) continue;
+        if (pr.kind == PropKind::Barrel) explode_barrel(pr);
+        else pr.alive = false; // crate splinters in the blast
     }
 }
 
@@ -504,6 +563,107 @@ void Game::enter_tile(Entity& e) {
         const char* verb = (&e == &player_) ? "step" : "steps";
         damage(e, 4, std::format("{} {} on the spikes.", e.name, verb));
     }
+}
+
+// Burn ticks (fire damage) then stun; returns true if the entity is stunned and
+// must skip its action this turn.
+bool Game::tick_status(Entity& e) {
+    if (&e != &player_ && !e.alive) return false;
+    if (e.burn > 0) {
+        --e.burn;
+        const char* verb = (&e == &player_) ? "are" : "is";
+        damage(e, 3, std::format("{} {} burning.", e.name, verb));
+    }
+    if (e.stun > 0) { --e.stun; return e.alive; }
+    return false;
+}
+
+void Game::fire_projectile(const Entity& shooter, Vec2 dir) {
+    if (dir.x == 0 && dir.y == 0) return;
+    projectiles_.push_back(Projectile{shooter.pos, dir, 5, 2, Faction::Monster, true});
+    log(std::format("{} fires a spam blast!", shooter.name));
+}
+
+// Move every projectile up to its speed, resolving the first thing it meets.
+void Game::advance_projectiles() {
+    for (auto& pj : projectiles_) {
+        for (int s = 0; s < pj.speed && pj.alive && state_ == State::Playing; ++s) {
+            const Vec2 next = pj.pos + pj.dir;
+            if (!map_.in_bounds(next) || map_.is_wall(next)) { pj.alive = false; break; }
+            if (Prop* pr = prop_at(next)) {
+                if (pr->kind == PropKind::Barrel) explode_barrel(*pr);
+                pj.alive = false; // a crate just soaks it (cover)
+                break;
+            }
+            if (Entity* e = entity_at(next, nullptr)) {
+                damage(*e, pj.damage, std::format("{} is hit by spam for {} damage.", e->name, pj.damage));
+                pj.alive = false;
+                break;
+            }
+            pj.pos = next;
+        }
+    }
+    std::erase_if(projectiles_, [](const Projectile& p) { return !p.alive; });
+}
+
+// Slide a prop along `dir`, resolving pits (crate fills, barrel falls), bodies
+// (crate crushes, barrel detonates), walls and other props.
+void Game::push_prop(Prop& pr, Vec2 dir, bool strong) {
+    int dist = strong ? 3 : 1;
+    while (dist-- > 0 && pr.alive) {
+        const Vec2 next = pr.pos + dir;
+        if (!map_.in_bounds(next) || map_.is_wall(next)) {
+            if (pr.kind == PropKind::Barrel) explode_barrel(pr);
+            break;
+        }
+        if (map_.is_pit(next)) {
+            if (pr.kind == PropKind::Crate) {
+                map_.at(next).type = TileType::Floor;
+                pr.alive = false;
+                log("The crate drops in and fills the pit.");
+            } else {
+                pr.alive = false;
+                log("The barrel tumbles into the pit.");
+            }
+            break;
+        }
+        if (Entity* e = entity_at(next, nullptr)) {
+            if (pr.kind == PropKind::Barrel) {
+                explode_barrel(pr);
+            } else {
+                damage(*e, 4, std::format("The crate slams into {}.", e->name));
+                if (e->alive) apply_knockback(*e, dir, 2);
+            }
+            break;
+        }
+        if (prop_at(next) != nullptr) {
+            if (pr.kind == PropKind::Barrel) explode_barrel(pr);
+            break;
+        }
+        pr.pos = next;
+    }
+}
+
+bool Game::shove(Vec2 dir) {
+    const Vec2 dest = player_.pos + dir;
+    if (Entity* e = monster_at(dest)) {
+        damage(*e, 2, std::format("You shove {}!", e->name));
+        if (e->alive) apply_knockback(*e, dir, std::max(1, player_.force + 3 - e->weight));
+        return true;
+    }
+    if (Prop* pr = prop_at(dest)) {
+        push_prop(*pr, dir, true);
+        return true;
+    }
+    if (map_.walkable(dest)) { // nothing to shove: a short lunge
+        player_.pos = dest;
+        enter_tile(player_);
+        if (player_.alive && state_ == State::Playing) {
+            if (Item* it = item_at(dest)) pickup(*it);
+        }
+        return true;
+    }
+    return false;
 }
 
 void Game::player_gain_xp(int xp) {
@@ -544,6 +704,14 @@ bool Game::apply_command(Command cmd) {
         case Command::MoveNE: return try_move_player({1, -1});
         case Command::MoveSW: return try_move_player({-1, 1});
         case Command::MoveSE: return try_move_player({1, 1});
+        case Command::ShoveW:  return shove({-1, 0});
+        case Command::ShoveE:  return shove({1, 0});
+        case Command::ShoveN:  return shove({0, -1});
+        case Command::ShoveS:  return shove({0, 1});
+        case Command::ShoveNW: return shove({-1, -1});
+        case Command::ShoveNE: return shove({1, -1});
+        case Command::ShoveSW: return shove({-1, 1});
+        case Command::ShoveSE: return shove({1, 1});
         case Command::Wait:      return true;
         case Command::UseCoffee: return use_coffee();
         case Command::Descend:
@@ -565,6 +733,7 @@ bool Game::advance(Command cmd) {
     const bool acted = apply_command(cmd);
     if (acted && state_ == State::Playing) {
         monsters_turn();
+        if (state_ == State::Playing) tick_status(player_); // your burn ticks each turn
         compute_fov(map_, player_.pos, fov_radius_);
     }
     if (state_ != State::Playing) record_score();
@@ -657,10 +826,19 @@ std::string Game::cell_str(Vec2 world) const {
             return ansi::bold + ansi::fg(c) + std::string{it.glyph};
         }
     }
-    // Barrel.
+    // Projectile.
+    for (const auto& pj : projectiles_) {
+        if (pj.alive && pj.pos == world) {
+            return ansi::bold + ansi::fg(ansi::Rgb{180, 170, 255}) + "*";
+        }
+    }
+    // Prop (barrel / crate).
     for (const auto& pr : props_) {
         if (pr.alive && pr.pos == world) {
-            return ansi::bold + ansi::fg(ansi::scale(ansi::Rgb{198, 132, 70}, std::max(light, 0.8))) + "0";
+            const ansi::Rgb col = pr.kind == sh::PropKind::Barrel ? ansi::Rgb{198, 132, 70}
+                                                                  : ansi::Rgb{150, 120, 84};
+            const char* g = pr.kind == sh::PropKind::Barrel ? "0" : "▣";
+            return ansi::bold + ansi::fg(ansi::scale(col, std::max(light, 0.8))) + g;
         }
     }
 
@@ -858,15 +1036,19 @@ std::string Game::ascii_snapshot() const {
                         case TileType::Spikes:     ch = '^'; break;
                     }
                 }
+                bool drew = false;
+                for (const auto& pj : projectiles_)
+                    if (pj.alive && pj.pos == w) { ch = '*'; drew = true; break; }
                 if (w == player_.pos) {
                     ch = '@';
+                } else if (drew) {
+                    // projectile already chosen
                 } else if (const Prop* pr = [&]() -> const Prop* {
                                for (const auto& p : props_)
                                    if (p.alive && p.pos == w) return &p;
                                return nullptr;
                            }()) {
-                    (void)pr;
-                    ch = '0'; // barrel
+                    ch = pr->kind == PropKind::Barrel ? '0' : '=';
                 } else {
                     for (const auto& m : monsters_) {
                         if (m.alive && m.pos == w) { ch = m.glyph; break; }

@@ -184,6 +184,15 @@ void place_hazards(DungeonResult& res, Rng& rng, int depth) {
                 res.barrels.push_back(p);
             }
         }
+        const int crates = std::min(rng.range(0, 2), 2);
+        for (int c = 0; c < crates; ++c) {
+            const Vec2 p = pick();
+            if (m.in_bounds(p) &&
+                std::find(res.barrels.begin(), res.barrels.end(), p) == res.barrels.end() &&
+                std::find(res.crates.begin(), res.crates.end(), p) == res.crates.end()) {
+                res.crates.push_back(p);
+            }
+        }
     }
 
     if (!reachable(m, res.player_start, res.stairs)) {

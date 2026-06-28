@@ -24,6 +24,7 @@ struct DungeonResult {
     Vec2 player_start{};
     Vec2 stairs{};
     std::vector<Vec2> barrels;  // explosive-barrel spawn positions
+    std::vector<Vec2> crates;   // pushable crate spawn positions
 };
 
 // Builds a fully connected dungeon of the requested size. `depth` is the floor

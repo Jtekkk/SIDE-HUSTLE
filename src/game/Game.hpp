@@ -34,6 +34,7 @@ public:
     enum class Command {
         None, Wait, Descend, UseCoffee,
         MoveW, MoveE, MoveN, MoveS, MoveNW, MoveNE, MoveSW, MoveSE,
+        ShoveW, ShoveE, ShoveN, ShoveS, ShoveNW, ShoveNE, ShoveSW, ShoveSE,
     };
 
     explicit Game(Config config);
@@ -52,6 +53,7 @@ public:
     [[nodiscard]] const std::vector<Entity>& monsters() const { return monsters_; }
     [[nodiscard]] const std::vector<Item>& items() const { return items_; }
     [[nodiscard]] const std::vector<Prop>& props() const { return props_; }
+    [[nodiscard]] const std::vector<Projectile>& projectiles() const { return projectiles_; }
     [[nodiscard]] Vec2 stairs() const { return stairs_; }
     [[nodiscard]] int depth() const { return depth_; }
     [[nodiscard]] int level() const { return level_; }
@@ -89,6 +91,11 @@ private:
     void apply_knockback(Entity& target, Vec2 dir, int power);
     void explode_barrel(Prop& barrel);
     void enter_tile(Entity& e);           // spike damage / pit death on entry
+    bool shove(Vec2 dir);                 // kick: knock a foe / push a prop
+    void push_prop(Prop& pr, Vec2 dir, bool strong);
+    void fire_projectile(const Entity& shooter, Vec2 dir);
+    void advance_projectiles();
+    bool tick_status(Entity& e);          // burn damage + stun; true if stunned
     Entity* entity_at(Vec2 p, const Entity* exclude = nullptr);
     Prop* prop_at(Vec2 p);
     void player_gain_xp(int xp);
@@ -118,6 +125,7 @@ private:
     std::vector<Entity> monsters_;
     std::vector<Item> items_;
     std::vector<Prop> props_;
+    std::vector<Projectile> projectiles_;
     Vec2 stairs_{};
 
     int depth_{1};

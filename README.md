@@ -111,6 +111,7 @@ double-click it or run it from `cmd` / PowerShell. Use a modern terminal
 |------|--------|
 | `w a s d`, `h j k l`, or arrow keys | Move / bump-to-attack |
 | `y u b n` | Move diagonally |
+| **Shift + direction** (GUI) / **uppercase `H J K L Y U B N`** (terminal) | **Shove** — kick a foe back hard, or push a barrel/crate |
 | `e` | Drink a coffee (heals, if you're carrying one) |
 | `.` or space | Wait a turn |
 | `>` | Descend the stairs (when standing on `>`) |
@@ -151,6 +152,14 @@ positioning is the game:
   set up combos by knocking a foe into one beside a pack.
 - **Pits** (`O`) and barrels are obstacles enemies path *around*, so terrain
   becomes a weapon you exploit with forced movement.
+- **Shove** (Shift+direction) is a dedicated kick: knock a foe back hard for
+  almost no damage (pure setup), or push a **crate**/barrel several tiles.
+- **Crates** (`=`) are inert cover: shove one into a **pit to fill it**, into a
+  foe to crush it, or in front of a **Phisher** to block its shots.
+- **Status effects**: a hard wall/crate slam **stuns** a foe (it skips a turn);
+  barrel blasts set things **on fire** (damage over time — including you).
+- **Phishers** (`p`) are ranged: they keep their distance and fire **projectiles**
+  down straight lines. Break their line of fire, dodge, or hide behind a crate.
 
 ### What you'll meet
 
@@ -160,6 +169,7 @@ positioning is the game:
 | `b` | Bug | Weak, light — flies far when hit |
 | `c` | Needy Client | Hits harder |
 | `r` | Recruiter | Tough, heavier |
+| `p` | Phisher | Ranged — kites and fires projectiles down straight lines |
 | `M` | Middle Manager | Heavy: resists knockback, shoves you hard |
 | `&` | The CEO | Final-floor boss, guards the exit |
 | `$` | Cash | Score |
@@ -167,7 +177,8 @@ positioning is the game:
 | `/` | Better laptop | Permanent attack upgrade |
 | `O` | Pit | Knock enemies in for an instant kill (and don't get shoved in) |
 | `^` | Spikes | Hurts whatever steps or is shoved onto it |
-| `0` | Barrel | Push it; detonates when something slams into it |
+| `0` | Barrel | Push it; detonates (and burns) when something slams into it |
+| `=` | Crate | Inert cover — shove into pits to fill them, or to block Phishers |
 
 ## Architecture & the "advanced C++"
 
