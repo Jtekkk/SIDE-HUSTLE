@@ -297,6 +297,7 @@ struct Anim {
     int prevHp = 0, prevCash = 0, prevLevel = 1, lastDepth = -1;
     float hpShown = 1.0f, xpShown = 0.0f, time = 0.0f;
     float shake = 0.0f, playerPunch = 0.0f, playerLunge = 0.0f, boom = 0.0f;
+    int bossWindup = 0;   // to detect the CEO's shockwave firing
     Vector2 playerLungeDir{};
 };
 Vector2 tile_center(float wx, float wy, float camx, float camy) {
@@ -306,7 +307,18 @@ Vector2 tile_center(float wx, float wy, float camx, float camy) {
 void sync_fx(const Game& g, Anim& a, float dt, float camx, float camy) {
     a.time += dt;
     const auto& mons = g.monsters();
-    const bool floor_changed = g.depth() != a.lastDepth || a.monR.size() != mons.size();
+    const bool floor_changed = g.depth() != a.lastDepth;
+    // Boss summons grow the monster list mid-floor — append new entries (with a
+    // little spawn poof) instead of resetting everything.
+    if (!floor_changed && a.monR.size() < mons.size()) {
+        for (std::size_t i = a.monR.size(); i < mons.size(); ++i) {
+            a.monR.push_back({(float)mons[i].pos.x, (float)mons[i].pos.y});
+            a.monHp.push_back(mons[i].combat.hp);
+            a.monPunch.push_back(0.0f);
+            burst(tile_center((float)mons[i].pos.x, (float)mons[i].pos.y, camx, camy),
+                  C(150, 140, 255), 14, 160.0f, 0.5f, 3.0f, false);
+        }
+    }
     if (floor_changed) {
         a.lastDepth = g.depth();
         a.monR.assign(mons.size(), {});
@@ -319,6 +331,7 @@ void sync_fx(const Game& g, Anim& a, float dt, float camx, float camy) {
         a.playerR = {(float)g.player().pos.x, (float)g.player().pos.y};
         a.prevHp = g.player().combat.hp; a.prevCash = g.cash(); a.prevLevel = g.level();
         a.shake = a.playerPunch = a.playerLunge = a.boom = 0.0f;
+        a.bossWindup = 0;
         a.propAlive.assign(g.props().size(), 0);
         for (std::size_t i = 0; i < g.props().size(); ++i) a.propAlive[i] = g.props()[i].alive ? 1 : 0;
         gParticles.clear(); gFloats.clear();
@@ -372,6 +385,24 @@ void sync_fx(const Game& g, Anim& a, float dt, float camx, float camy) {
                 a.shake = std::min(16.0f, a.shake + 9.0f);
             }
         }
+
+        // CEO shockwave: its wind-up flag dropping from 1 to 0 means it just fired.
+        int bw = 0;
+        Vector2 bossSc{};
+        bool hasBoss = false;
+        for (std::size_t i = 0; i < mons.size(); ++i)
+            if (mons[i].alive && mons[i].glyph == '&') {
+                bw = mons[i].windup;
+                bossSc = tile_center(a.monR[i].x, a.monR[i].y, camx, camy);
+                hasBoss = true;
+            }
+        if (hasBoss && a.bossWindup == 1 && bw == 0) {
+            burst(bossSc, C(255, 130, 130), 60, 380.0f, 0.95f, 5.5f, false);
+            add_float({bossSc.x, bossSc.y - 34}, "SHOCKWAVE", C(255, 150, 150), 30);
+            a.shake = std::min(18.0f, a.shake + 12.0f);
+            a.boom = std::min(1.0f, a.boom + 0.6f);
+        }
+        a.bossWindup = bw;
     }
     const float k = std::min(1.0f, dt * 16.0f);
     a.playerR.x += ((float)g.player().pos.x - a.playerR.x) * k;
@@ -661,6 +692,10 @@ void draw_hud(const Game& g, const Anim& a, int x, int w, int h) {
     stat("Coffee", TextFormat("x%d  (E)", g.coffees()), C(98, 208, 218));
     stat("Attack", TextFormat("%d", p.combat.attack), C(232, 236, 246));
     stat("Defense", TextFormat("%d", p.combat.defense), C(232, 236, 246));
+    stat("Dash", g.dash_cd() == 0 ? "READY  Ctrl+dir" : TextFormat("%d turns", g.dash_cd()),
+         g.dash_cd() == 0 ? C(120, 225, 235) : C(120, 128, 150));
+    stat("Slam", g.slam_cd() == 0 ? "READY  (X)" : TextFormat("%d turns", g.slam_cd()),
+         g.slam_cd() == 0 ? C(255, 215, 150) : C(120, 128, 150));
     y += 8;
     DrawLine(ix, y, x + w - 22, y, C(54, 58, 78)); y += 14;
     dt("LOG", ix, y, 16, C(150, 162, 190)); y += 24;
@@ -690,9 +725,8 @@ void draw_hud(const Game& g, const Anim& a, int x, int w, int h) {
     DrawLine(ix, cy - 12, x + w - 22, cy - 12, C(54, 58, 78));
     const Color hc = C(120, 128, 150);
     dt("Move WASD/Arrows/HJKL   Diag YUBN", ix, cy, 14, hc);
-    dt("Shove  Shift + direction (knock / push)", ix, cy + 19, 14, hc);
-    dt("Coffee E   Wait .   Descend Enter", ix, cy + 38, 14, hc);
-    dt("Quit  Q", ix, cy + 57, 14, hc);
+    dt("Shove Shift+dir   Dash Ctrl+dir   Slam X", ix, cy + 19, 14, hc);
+    dt("Coffee E   Wait .   Descend Enter   Quit Q", ix, cy + 38, 14, hc);
     EndScissorMode();
 }
 void draw_scoreboard(const sh::HighScores& hs, int cx, int y) {
@@ -743,6 +777,20 @@ Game::Command shove_to_cmd(Vec2 d) {
     if (d.y < 0) return Game::Command::ShoveN;
     if (d.y > 0) return Game::Command::ShoveS;
     return Game::Command::None;
+}
+Game::Command dash_to_cmd(Vec2 d) {
+    if (d.x < 0 && d.y < 0) return Game::Command::DashNW;
+    if (d.x > 0 && d.y < 0) return Game::Command::DashNE;
+    if (d.x < 0 && d.y > 0) return Game::Command::DashSW;
+    if (d.x > 0 && d.y > 0) return Game::Command::DashSE;
+    if (d.x < 0) return Game::Command::DashW;
+    if (d.x > 0) return Game::Command::DashE;
+    if (d.y < 0) return Game::Command::DashN;
+    if (d.y > 0) return Game::Command::DashS;
+    return Game::Command::None;
+}
+bool is_dash_cmd(Game::Command c) {
+    return c >= Game::Command::DashW && c <= Game::Command::DashSE;
 }
 
 // ---- procedural textures & render targets ----------------------------------
@@ -876,6 +924,7 @@ int main() {
         if (user == nullptr || *user == '\0') user = std::getenv("USER");
         if (user != nullptr && *user != '\0') cfg.player_name = user;
         game = std::make_unique<Game>(std::move(cfg));
+        if (const char* f = std::getenv("SH_FLOOR")) game->debug_warp(std::atoi(f));
         anim = Anim{}; flash = 0.0f; move_timer = 0.0f; phase = Phase::Playing;
     };
 
@@ -890,6 +939,7 @@ int main() {
         ++frame;
         a_time_rot_v += dt * 18.0f;
         bool quit = false;
+        bool pending_slam = false, pending_dash = false;
 
         if (smoke_frames > 0) {
             if (frame == 2 && phase == Phase::Title) start_game();
@@ -899,11 +949,18 @@ int main() {
                     std::vector<Vec2> blk;
                     for (const auto& pr : game->props()) if (pr.alive) blk.push_back(pr.pos);
                     Game::Command c = Game::Command::Wait;
-                    if (pp == game->stairs()) c = Game::Command::Descend;
+                    // If a foe is right next to us, occasionally ground-pound to
+                    // exercise the Slam AoE (and its FX) during the smoke run.
+                    bool adj = false;
+                    for (const auto& m : game->monsters())
+                        if (m.alive && std::abs(m.pos.x - pp.x) <= 1 && std::abs(m.pos.y - pp.y) <= 1 &&
+                            !(m.pos == pp)) { adj = true; break; }
+                    if (adj && game->slam_cd() == 0) c = Game::Command::Slam;
+                    else if (pp == game->stairs()) c = Game::Command::Descend;
                     else if (auto s = sh::next_step_towards(game->map(), pp, game->stairs(), blk)) {
                         c = dir_to_cmd({(s->x > pp.x) - (s->x < pp.x), (s->y > pp.y) - (s->y < pp.y)});
                     }
-                    game->advance(c);
+                    if (game->advance(c) && c == Game::Command::Slam) pending_slam = true;
                 }
                 if (!game->is_playing()) { board.load(); phase = Phase::End; }
             }
@@ -921,21 +978,25 @@ int main() {
         } else if (phase == Phase::Playing && game && smoke_frames == 0) {
             Game::Command cmd = Game::Command::None;
             if (IsKeyPressed(KEY_E)) cmd = Game::Command::UseCoffee;
+            else if (IsKeyPressed(KEY_X)) cmd = Game::Command::Slam; // ground-pound
             else if (IsKeyPressed(KEY_ENTER)) cmd = Game::Command::Descend;
             else if (IsKeyPressed(KEY_PERIOD) || IsKeyPressed(KEY_SPACE)) cmd = Game::Command::Wait;
             else {
                 const Vec2 d = movement_dir();
                 const bool shoving = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+                const bool dashing = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
                 move_timer -= dt;
                 if (d.x == 0 && d.y == 0) move_timer = 0.0f;
                 else if (move_timer <= 0.0f) {
-                    cmd = shoving ? shove_to_cmd(d) : dir_to_cmd(d);
+                    cmd = dashing ? dash_to_cmd(d) : shoving ? shove_to_cmd(d) : dir_to_cmd(d);
                     move_timer = kMoveRepeat;
                 }
             }
             if (IsKeyPressed(KEY_Q)) quit = true;
             const int before = game->player().combat.hp;
-            if (cmd != Game::Command::None) game->advance(cmd);
+            const bool acted = (cmd != Game::Command::None) && game->advance(cmd);
+            if (acted && cmd == Game::Command::Slam) pending_slam = true;
+            if (acted && is_dash_cmd(cmd)) pending_dash = true;
             if (game->player().combat.hp < before) flash = std::min(1.0f, flash + 0.55f);
             if (!game->is_playing()) { board.load(); phase = Phase::End; }
         } else if (phase == Phase::End) {
@@ -959,6 +1020,17 @@ int main() {
             camy = std::clamp(anim.playerR.y + 0.5f - rowsF / 2.0f, 0.0f,
                               std::max(0.0f, (float)game->map().height() - rowsF));
             sync_fx(*game, anim, dt, camx, camy);
+
+            if (pending_slam) {
+                const Vector2 pc = tile_center(anim.playerR.x, anim.playerR.y, camx, camy);
+                burst(pc, C(255, 220, 150), 30, 280.0f, 0.6f, 4.0f, false);
+                add_float({pc.x, pc.y - 24}, "SLAM", C(255, 230, 160), 26);
+                anim.shake = std::min(14.0f, anim.shake + 7.0f);
+            }
+            if (pending_dash) {
+                const Vector2 pc = tile_center(anim.playerR.x, anim.playerR.y, camx, camy);
+                burst(pc, C(120, 230, 235), 16, 200.0f, 0.45f, 3.0f, false);
+            }
 
             // Ambient dust motes drifting through the torchlight.
             if (frand() < 0.6f) {
@@ -1224,6 +1296,17 @@ int main() {
                 if (game->map().in_bounds(pj.pos) && game->map().at(pj.pos).visible)
                     draw_projectile(tile_center(pj.pos.x, pj.pos.y, camx, camy),
                                     {(float)pj.dir.x, (float)pj.dir.y});
+            // CEO shockwave telegraph: a pulsing danger ring you must leave.
+            for (std::size_t i = 0; i < game->monsters().size(); ++i) {
+                const auto& m = game->monsters()[i];
+                if (!m.alive || m.glyph != '&' || m.windup <= 0) continue;
+                if (!game->map().in_bounds(m.pos) || !game->map().at(m.pos).visible) continue;
+                const Vector2 c = tile_center(anim.monR[i].x, anim.monR[i].y, camx, camy);
+                const float r = 3.5f * kTile;
+                const float pulse = 0.5f + 0.5f * std::sin(anim.time * 9.0f);
+                DrawCircleV(c, r, Fade(C(255, 60, 60), 0.10f * pulse));
+                DrawRing(c, r - 4, r, 0, 360, 64, Fade(C(255, 90, 90), 0.5f + 0.4f * pulse));
+            }
             if (game->player().burn > 0) {
                 const Vector2 pc = tile_center(anim.playerR.x, anim.playerR.y, camx, camy);
                 for (int i = 0; i < 3; ++i)
@@ -1299,6 +1382,15 @@ int main() {
                         game->map().at(pr.pos).visible) { saw = true; break; }
                 if (saw) { TakeScreenshot("sh_new.png"); new_shot = true; }
             }
+            static bool boss_shot = false, slam_shot = false;
+            if (!boss_shot && frame > 14 && phase == Phase::Playing && game) {
+                for (const auto& m : game->monsters())
+                    if (m.alive && m.glyph == '&' && game->map().in_bounds(m.pos) &&
+                        game->map().at(m.pos).visible) {
+                        TakeScreenshot("sh_boss.png"); boss_shot = true; break;
+                    }
+            }
+            if (!slam_shot && pending_slam) { TakeScreenshot("sh_slam.png"); slam_shot = true; }
             if (frame == smoke_frames - 1) TakeScreenshot("sh_final.png");
         }
         if (quit) break;

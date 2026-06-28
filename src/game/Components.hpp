@@ -34,6 +34,8 @@ struct Entity {
     int force{1};         // knockback power dealt on a hit
     int stun{0};          // turns it skips (e.g. after a wall slam)
     int burn{0};          // turns of fire damage remaining
+    int ability_timer{0}; // boss: paces its special moves
+    int windup{0};        // boss: >0 means a telegraphed attack fires next turn
     bool alive{true};
 };
 

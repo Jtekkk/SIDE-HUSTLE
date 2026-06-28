@@ -35,12 +35,18 @@ public:
         None, Wait, Descend, UseCoffee,
         MoveW, MoveE, MoveN, MoveS, MoveNW, MoveNE, MoveSW, MoveSE,
         ShoveW, ShoveE, ShoveN, ShoveS, ShoveNW, ShoveNE, ShoveSW, ShoveSE,
+        DashW, DashE, DashN, DashS, DashNW, DashNE, DashSW, DashSE,
+        Slam,
     };
 
     explicit Game(Config config);
 
     int run();       // interactive play in a raw terminal
     int selftest();  // headless: auto-plays floors and prints a report
+
+    // Smoke/testing only: regenerate the world at an arbitrary depth (e.g. to
+    // drop straight onto the CEO floor for a headless render check).
+    void debug_warp(int depth);
 
     // Apply one player command and (if it consumed a turn) resolve the monster
     // turn, refresh field-of-view, and record the score on death/win. Returns
@@ -61,6 +67,10 @@ public:
     [[nodiscard]] int xp_next() const { return xp_next_; }
     [[nodiscard]] int cash() const { return cash_; }
     [[nodiscard]] int coffees() const { return coffees_; }
+    [[nodiscard]] int dash_cd() const { return dash_cd_; }
+    [[nodiscard]] int slam_cd() const { return slam_cd_; }
+    static constexpr int kDashCd = 4;
+    static constexpr int kSlamCd = 6;
     [[nodiscard]] int fov_radius() const { return fov_radius_; }
     [[nodiscard]] int score() const;
     [[nodiscard]] bool is_playing() const { return state_ == State::Playing; }
@@ -92,9 +102,14 @@ private:
     void explode_barrel(Prop& barrel);
     void enter_tile(Entity& e);           // spike damage / pit death on entry
     bool shove(Vec2 dir);                 // kick: knock a foe / push a prop
+    bool dash(Vec2 dir);                  // ability: quick multi-tile reposition
+    bool slam();                          // ability: ground-pound (AoE knockback)
     void push_prop(Prop& pr, Vec2 dir, bool strong);
     void fire_projectile(const Entity& shooter, Vec2 dir);
     void advance_projectiles();
+    void boss_turn(Entity& boss);         // CEO moveset (summon / shockwave / chase)
+    void boss_shockwave(Entity& boss);
+    void boss_summon(Entity& boss);
     bool tick_status(Entity& e);          // burn damage + stun; true if stunned
     Entity* entity_at(Vec2 p, const Entity* exclude = nullptr);
     Prop* prop_at(Vec2 p);
@@ -126,7 +141,12 @@ private:
     std::vector<Item> items_;
     std::vector<Prop> props_;
     std::vector<Projectile> projectiles_;
+    std::vector<Entity> pending_spawns_; // boss summons, merged after the turn
     Vec2 stairs_{};
+
+    int dash_cd_{0};
+    int slam_cd_{0};
+    bool dash_armed_{false}; // terminal: 'z' pressed, waiting for a direction
 
     int depth_{1};
     int level_{1};

@@ -112,6 +112,8 @@ double-click it or run it from `cmd` / PowerShell. Use a modern terminal
 | `w a s d`, `h j k l`, or arrow keys | Move / bump-to-attack |
 | `y u b n` | Move diagonally |
 | **Shift + direction** (GUI) / **uppercase `H J K L Y U B N`** (terminal) | **Shove** — kick a foe back hard, or push a barrel/crate |
+| **Ctrl + direction** (GUI) / **`Z` + direction** (terminal) | **Dash** — lunge up to 3 tiles (cooldown), close gaps or escape |
+| **`x`** | **Slam** — ground-pound: AoE knockback + stun to everything adjacent (cooldown) |
 | `e` | Drink a coffee (heals, if you're carrying one) |
 | `.` or space | Wait a turn |
 | `>` | Descend the stairs (when standing on `>`) |

@@ -207,11 +207,28 @@ void Game::new_floor(int depth) {
     items_.clear();
     props_.clear();
     projectiles_.clear();
+    pending_spawns_.clear();
     for (const Vec2 b : dungeon.barrels) props_.push_back(Prop{b, PropKind::Barrel, true});
     for (const Vec2 cr : dungeon.crates) props_.push_back(Prop{cr, PropKind::Crate, true});
     spawn_monsters(dungeon.rooms);
     spawn_items(dungeon.rooms);
 
+    compute_fov(map_, player_.pos, fov_radius_);
+}
+
+void Game::debug_warp(int depth) {
+    new_floor(depth);
+    // Drop the player next to the stairs so a headless render frames whatever
+    // guards the exit (the CEO on the final floor).
+    static const Vec2 around[8] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1},
+                                   {1, 1}, {-1, 1}, {1, -1}, {-1, -1}};
+    for (const Vec2 d : around) {
+        const Vec2 p{stairs_.x + d.x, stairs_.y + d.y};
+        if (map_.in_bounds(p) && map_.walkable(p) && entity_at(p) == nullptr) {
+            player_.pos = p;
+            break;
+        }
+    }
     compute_fov(map_, player_.pos, fov_radius_);
 }
 
@@ -268,6 +285,15 @@ void Game::spawn_items(const std::vector<Room>& rooms) {
 // ---------------------------------------------------------------------------
 
 bool Game::handle_key(int key) {
+    // Dash is a two-step: press 'z' to arm, then a direction. The next key is
+    // interpreted as the dash heading (a movement key) — anything else cancels.
+    if (dash_armed_) {
+        dash_armed_ = false;
+        if (const auto dir = key_to_dir(key)) return dash(*dir);
+        log("Dash cancelled.");
+        return false;
+    }
+
     if (const auto dir = key_to_dir(key)) return try_move_player(*dir);
 
     switch (key) {
@@ -279,6 +305,14 @@ bool Game::handle_key(int key) {
         case 'U': return shove({1, -1});
         case 'B': return shove({-1, 1});
         case 'N': return shove({1, 1});
+        case 'z':
+        case 'Z':
+            dash_armed_ = true;
+            log("Dash: press a direction (or any key to cancel).");
+            return false;
+        case 'x':
+        case 'X':
+            return slam();
         case '.':
         case ' ':
             return true; // wait a turn
@@ -380,6 +414,8 @@ void Game::monsters_turn() {
         if (tick_status(m)) continue;                     // burning / stunned -> skip
         if (!m.alive || state_ != State::Playing) continue; // burn may have finished it
 
+        if (m.glyph == '&') { boss_turn(m); continue; }   // the CEO has a moveset
+
         const int dist = m.pos.chebyshev(player_.pos);
         const bool aware = map_.in_bounds(m.pos) && map_.at(m.pos).visible && dist <= 12;
 
@@ -436,6 +472,10 @@ void Game::monsters_turn() {
             }
         }
     }
+
+    // Merge any boss summons now that we're done iterating monsters_.
+    for (auto& s : pending_spawns_) monsters_.push_back(std::move(s));
+    pending_spawns_.clear();
 }
 
 void Game::attack(Entity& attacker, Entity& defender) {
@@ -666,6 +706,116 @@ bool Game::shove(Vec2 dir) {
     return false;
 }
 
+// Ability: dash up to 3 tiles, stopping before the first obstacle (great for
+// slipping out of a projectile's path).
+bool Game::dash(Vec2 dir) {
+    if (dir.x == 0 && dir.y == 0) return false;
+    if (dash_cd_ > 0) { log("Dash isn't ready yet."); return false; }
+    Vec2 p = player_.pos;
+    int moved = 0;
+    for (int s = 0; s < 3; ++s) {
+        const Vec2 next = p + dir;
+        if (!map_.walkable(next) || monster_at(next) || prop_at(next)) break;
+        p = next;
+        ++moved;
+    }
+    if (moved == 0) { log("No room to dash."); return false; }
+    player_.pos = p;
+    dash_cd_ = kDashCd;
+    log("You dash!");
+    enter_tile(player_);
+    if (player_.alive && state_ == State::Playing) {
+        if (Item* it = item_at(p)) pickup(*it);
+    }
+    return true;
+}
+
+// Ability: ground-pound. Damage + stun + knock every adjacent foe outward, and
+// shove adjacent props away (barrels may detonate).
+bool Game::slam() {
+    if (slam_cd_ > 0) { log("Slam isn't ready yet."); return false; }
+    slam_cd_ = kSlamCd;
+    log("You ground-pound the floor!");
+    static const Vec2 dirs[8] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+    for (const Vec2 d : dirs) {
+        const Vec2 c = player_.pos + d;
+        if (Entity* e = monster_at(c)) {
+            damage(*e, 4);
+            if (e->alive) { e->stun = std::max(e->stun, 1); apply_knockback(*e, d, 3); }
+        } else if (Prop* pr = prop_at(c)) {
+            push_prop(*pr, d, false);
+        }
+    }
+    return true;
+}
+
+// The CEO's moveset: a telegraphed shockwave, periodic summons, else a chase.
+void Game::boss_turn(Entity& m) {
+    ++m.ability_timer;
+    const int dist = m.pos.chebyshev(player_.pos);
+
+    if (m.windup > 0) { m.windup = 0; boss_shockwave(m); return; }
+    if (m.ability_timer % 6 == 0) {
+        int minions = 0;
+        for (const auto& o : monsters_) if (o.alive && &o != &m) ++minions;
+        if (minions < 6) { boss_summon(m); return; } // don't swarm endlessly
+    }
+    if (dist <= 4 && m.ability_timer % 5 == 0) {
+        m.windup = 1;
+        log("The CEO winds up a shockwave - get clear!");
+        return;
+    }
+    if (dist <= 1) { attack(m, player_); return; }
+
+    std::vector<Vec2> blocked;
+    for (const auto& o : monsters_) if (o.alive && &o != &m) blocked.push_back(o.pos);
+    for (const auto& pr : props_) if (pr.alive) blocked.push_back(pr.pos);
+    if (const auto step = next_step_towards(map_, m.pos, player_.pos, blocked)) {
+        if (*step != player_.pos && !monster_at(*step) && !prop_at(*step)) { m.pos = *step; enter_tile(m); }
+    }
+}
+
+void Game::boss_shockwave(Entity& m) {
+    log("The CEO unleashes a shockwave!");
+    const Vec2 c = m.pos;
+    auto hit = [&](Entity& e) {
+        if (&e == &m) return;
+        if ((&e != &player_ && !e.alive) || e.pos.chebyshev(c) > 3) return;
+        damage(e, 8);
+        if (e.alive) {
+            const Vec2 d = unit_dir(e.pos - c);
+            apply_knockback(e, (d.x == 0 && d.y == 0) ? Vec2{0, 1} : d, 3);
+        }
+    };
+    hit(player_);
+    for (auto& o : monsters_) hit(o);
+}
+
+void Game::boss_summon(Entity& m) {
+    log("The CEO posts urgent job listings!");
+    static const Vec2 dirs[8] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+    int spawned = 0;
+    for (const Vec2 d : dirs) {
+        if (spawned >= 2) break;
+        const Vec2 c = m.pos + d;
+        if (!map_.walkable(c) || c == player_.pos || monster_at(c) || prop_at(c)) continue;
+        Entity e;
+        e.pos = c;
+        e.faction = Faction::Monster;
+        if (rng_.chance(0.4)) {
+            e.kind = MonsterKind::Phisher; e.glyph = 'p'; e.color = 94; e.name = "a summoned Phisher";
+            e.combat = {8, 8, 3, 0}; e.xp_reward = 12; e.weight = 1; e.force = 1;
+        } else {
+            e.kind = MonsterKind::Bug; e.glyph = 'b'; e.color = 32; e.name = "a summoned Bug";
+            e.combat = {6, 6, 3, 0}; e.xp_reward = 4; e.weight = 0; e.force = 1;
+        }
+        e.combat.max_hp += depth_;
+        e.combat.hp = e.combat.max_hp;
+        pending_spawns_.push_back(e);
+        ++spawned;
+    }
+}
+
 void Game::player_gain_xp(int xp) {
     xp_ += xp;
     while (xp_ >= xp_next_) {
@@ -712,6 +862,15 @@ bool Game::apply_command(Command cmd) {
         case Command::ShoveNE: return shove({1, -1});
         case Command::ShoveSW: return shove({-1, 1});
         case Command::ShoveSE: return shove({1, 1});
+        case Command::DashW:  return dash({-1, 0});
+        case Command::DashE:  return dash({1, 0});
+        case Command::DashN:  return dash({0, -1});
+        case Command::DashS:  return dash({0, 1});
+        case Command::DashNW: return dash({-1, -1});
+        case Command::DashNE: return dash({1, -1});
+        case Command::DashSW: return dash({-1, 1});
+        case Command::DashSE: return dash({1, 1});
+        case Command::Slam:   return slam();
         case Command::Wait:      return true;
         case Command::UseCoffee: return use_coffee();
         case Command::Descend:
@@ -732,6 +891,8 @@ bool Game::advance(Command cmd) {
 
     const bool acted = apply_command(cmd);
     if (acted && state_ == State::Playing) {
+        if (dash_cd_ > 0) --dash_cd_;
+        if (slam_cd_ > 0) --slam_cd_;
         monsters_turn();
         if (state_ == State::Playing) tick_status(player_); // your burn ticks each turn
         compute_fov(map_, player_.pos, fov_radius_);
@@ -890,7 +1051,13 @@ std::string Game::hud_str() const {
     s += ansi::fg(label) + "Lvl " + ansi::fg(value) + std::format("{}", level_)
        + ansi::fg(dim) + std::format(" ({}/{} xp)", xp_, xp_next_) + "  ";
     s += ansi::fg(yellow) + std::format("${}", cash_) + "  ";
-    s += ansi::fg(Rgb{90, 205, 215}) + std::format("coffee x{}", coffees_) + ansi::reset + "\r\n";
+    s += ansi::fg(Rgb{90, 205, 215}) + std::format("coffee x{}", coffees_) + "  ";
+    const Rgb ready{120, 220, 160};
+    s += ansi::fg(label) + "dash " +
+         ansi::fg(dash_cd_ == 0 ? ready : dim) + (dash_cd_ == 0 ? std::string{"rdy"} : std::format("{}", dash_cd_)) + "  ";
+    s += ansi::fg(label) + "slam " +
+         ansi::fg(slam_cd_ == 0 ? ready : dim) + (slam_cd_ == 0 ? std::string{"rdy"} : std::format("{}", slam_cd_));
+    s += std::string{ansi::reset} + "\r\n";
 
     // Message log (latest brightest).
     s += "\r\n";
@@ -903,7 +1070,7 @@ std::string Game::hud_str() const {
     }
 
     s += "\r\n " + ansi::fg(dim) +
-         "move wasd/hjkl/arrows · diag yubn · coffee e · wait . · descend > · quit q" +
+         "move wasd/hjkl · diag yubn · SHOVE-shift · dash z+dir · slam x · coffee e · wait . · descend > · quit q" +
          ansi::reset + "\r\n";
     return s;
 }
@@ -1131,6 +1298,45 @@ int Game::selftest() {
     }
 
     std::printf("\n%s\n", ascii_snapshot().c_str());
+
+    // Boss smoke: jump to the final floor and brawl the CEO (exercise the
+    // moveset, summons, shockwave, abilities) without crashing.
+    {
+        state_ = State::Playing;
+        level_ = 8;
+        player_.combat = {90, 90, 14, 2};
+        player_.burn = player_.stun = 0;
+        new_floor(kMaxDepth);
+        int bturns = 0, slams = 0, dashes = 0;
+        while (bturns++ < 600 && state_ == State::Playing) {
+            const Vec2 pp = player_.pos;
+            std::vector<Vec2> blk;
+            for (const auto& pr : props_) if (pr.alive) blk.push_back(pr.pos);
+            int key = '.';
+            if (pp == stairs_) {
+                key = '>';
+            } else if (const auto step = next_step_towards(map_, pp, stairs_, blk)) {
+                const Vec2 d = *step - pp;
+                // occasionally use abilities to exercise them
+                if (slam_cd_ == 0 && bturns % 11 == 0) { slam(); ++slams; }
+                else if (dash_cd_ == 0 && bturns % 7 == 0) { dash(d); ++dashes; }
+                else key = dir_to_key(d);
+            }
+            const bool acted = (key != '.') ? handle_key(key) : true;
+            if (acted && state_ == State::Playing) {
+                if (dash_cd_ > 0) --dash_cd_;
+                if (slam_cd_ > 0) --slam_cd_;
+                monsters_turn();
+                if (state_ == State::Playing) tick_status(player_);
+                compute_fov(map_, player_.pos, fov_radius_);
+            }
+            if (state_ == State::Won) break;
+        }
+        const auto alive = std::ranges::count_if(monsters_, [](const Entity& m) { return m.alive; });
+        std::printf("[selftest] boss floor: turns=%d state=%s monsters_alive=%lld slams=%d dashes=%d\n",
+                    bturns, state_ == State::Won ? "WON" : state_ == State::Dead ? "DEAD" : "TIMEOUT",
+                    static_cast<long long>(alive), slams, dashes);
+    }
 
     // Exercise the persistent scoreboard end-to-end (save -> reload).
     {
