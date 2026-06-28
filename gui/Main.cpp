@@ -818,6 +818,7 @@ int main() {
     auto start_game = [&]() {
         sh::Config cfg;
         cfg.seed = (std::uint64_t)std::time(nullptr);
+        if (const char* s = std::getenv("SH_SEED")) cfg.seed = std::strtoull(s, nullptr, 10);
         cfg.difficulty = diffs[diff_index];
         cfg.scores_path = scores_path;
         const char* user = std::getenv("USERNAME");

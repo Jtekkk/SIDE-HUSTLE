@@ -178,7 +178,7 @@ Game::Game(Config config)
     player_.force = 2;
     new_floor(1);
     log("You start your side hustle on floor 1. Find the stairs (>).");
-    log("Tip: your hits knock foes back — into walls, spikes, pits and barrels.");
+    log("Tip: your hits knock foes back - into walls, spikes, pits and barrels.");
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +322,7 @@ void Game::pickup(Item& item) {
             break;
         case ItemKind::Upgrade:
             player_.combat.attack += item.amount;
-            log("New laptop — your output (attack) permanently improves!");
+            log("New laptop - your output (attack) permanently improves!");
             break;
     }
 }
