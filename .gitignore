@@ -1,0 +1,11 @@
+# Build artifacts
+/build/
+*.o
+*.obj
+side-hustle
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+compile_commands.json
