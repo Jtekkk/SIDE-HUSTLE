@@ -51,19 +51,38 @@ const char* kCompositeFS = R"GLSL(
 in vec2 fragTexCoord;
 in vec4 fragColor;
 uniform sampler2D texture0;   // scene albedo
-uniform sampler2D lightTex;   // additive light buffer
+uniform sampler2D lightTex;   // additive (FOV-occluded) light buffer
+uniform sampler2D normalTex;  // surface normals (tangent space)
 uniform vec3 ambient;
+uniform vec2 res;
+uniform vec3  lightPos[8];     // xy = pixel position, z = height above the plane
+uniform float lightRad[8];
+uniform float lightInt[8];
+uniform int   lightCount;
 out vec4 finalColor;
 void main() {
     vec3 albedo = texture(texture0, fragTexCoord).rgb;
     vec3 light  = texture(lightTex, fragTexCoord).rgb;
-    vec3 lit = albedo * (ambient + light);
+    vec3 N = normalize(texture(normalTex, fragTexCoord).rgb * 2.0 - 1.0);
+
+    // Per-light directional (normal-mapped) relief term.
+    vec2 fp = fragTexCoord * res;
+    float relief = 0.0;
+    for (int i = 0; i < lightCount; ++i) {
+        vec2 dxy = lightPos[i].xy - fp;
+        float dist = length(dxy);
+        float at = clamp(1.0 - dist / lightRad[i], 0.0, 1.0);
+        at *= at;
+        vec3 L = normalize(vec3(dxy, lightPos[i].z));
+        relief += at * max(0.0, dot(N, L)) * lightInt[i];
+    }
+    // The flat (FOV-occluded) light gates the relief so walls still cast shadow.
+    vec3 lit = albedo * (ambient + light * (0.78 + 0.70 * relief));
+
     // filmic-ish tonemap for soft highlights
     lit = (lit * (2.2 * lit + 0.55)) / (lit * (2.0 * lit + 1.0) + 0.18);
-    // saturation lift
     float l = dot(lit, vec3(0.299, 0.587, 0.114));
     lit = mix(vec3(l), lit, 1.14);
-    // vignette
     vec2 d = fragTexCoord - 0.5;
     float vig = smoothstep(0.95, 0.35, length(d));
     lit *= mix(0.5, 1.0, vig);
@@ -124,12 +143,13 @@ void main() {
 // Globals (render resources)
 // ===========================================================================
 Font gFont{};
-Texture2D gFloorTex{}, gWallTex{}, gLightTex{};
+Texture2D gFloorTex{}, gWallTex{}, gLightTex{}, gFloorNrm{}, gWallNrm{};
 Shader gComposite{}, gBlur{}, gPost{};
 int gLocLightTex = 0, gLocAmbient = 0, gLocDir = 0;
 int gLocPostRes = 0, gLocPostTime = 0;
+int gLocNormalTex = 0, gLocCompRes = 0, gLocLightPos = 0, gLocLightRad = 0, gLocLightInt = 0, gLocLightCount = 0;
 
-RenderTexture2D gScene{}, gLight{}, gLit{}, gBloomA{}, gBloomB{}, gComposed{};
+RenderTexture2D gScene{}, gLight{}, gLit{}, gBloomA{}, gBloomB{}, gComposed{}, gNormal{};
 int gRtW = 0, gRtH = 0;
 constexpr int kBloomDiv = 3; // bloom buffers at 1/3 res
 
@@ -597,11 +617,41 @@ Game::Command dir_to_cmd(Vec2 d) {
 }
 
 // ---- procedural textures & render targets ----------------------------------
+// Derive a tangent-space normal map from a grayscale height image (Sobel-ish
+// central differences, wrapping at the edges so it stays tileable).
+Texture2D height_to_normal(const Image& src, float strength) {
+    Color* px = LoadImageColors(src);
+    const int w = src.width, h = src.height;
+    auto lum = [&](int x, int y) {
+        x = ((x % w) + w) % w; y = ((y % h) + h) % h;
+        const Color c = px[y * w + x];
+        return (0.299f * c.r + 0.587f * c.g + 0.114f * c.b) / 255.0f;
+    };
+    Image out = GenImageColor(w, h, C(128, 128, 255));
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const float dx = (lum(x - 1, y) - lum(x + 1, y)) * strength;
+            const float dy = (lum(x, y - 1) - lum(x, y + 1)) * strength;
+            float nx = dx, ny = dy, nz = 1.0f;
+            const float il = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
+            nx *= il; ny *= il; nz *= il;
+            ImageDrawPixel(&out, x, y, C((int)((nx * 0.5f + 0.5f) * 255),
+                                         (int)((ny * 0.5f + 0.5f) * 255),
+                                         (int)((nz * 0.5f + 0.5f) * 255)));
+        }
+    UnloadImageColors(px);
+    Texture2D t = LoadTextureFromImage(out);
+    SetTextureFilter(t, TEXTURE_FILTER_BILINEAR);
+    UnloadImage(out);
+    return t;
+}
+
 void make_textures() {
     Image f = GenImageCellular(128, 128, 11);   // stone tiling for floors
     ImageColorBrightness(&f, 40);
     gFloorTex = LoadTextureFromImage(f);
     SetTextureFilter(gFloorTex, TEXTURE_FILTER_BILINEAR);
+    gFloorNrm = height_to_normal(f, 2.4f);
     UnloadImage(f);
 
     Image w = GenImagePerlinNoise(128, 128, 0, 0, 5.0f); // rough rock for walls
@@ -609,6 +659,7 @@ void make_textures() {
     ImageColorContrast(&w, 25);
     gWallTex = LoadTextureFromImage(w);
     SetTextureFilter(gWallTex, TEXTURE_FILTER_BILINEAR);
+    gWallNrm = height_to_normal(w, 3.6f);
     UnloadImage(w);
 
     Image l = GenImageGradientRadial(192, 192, 0.10f, WHITE, C(255, 255, 255, 0));
@@ -621,11 +672,14 @@ void ensure_targets(int w, int h) {
     if (gRtW != 0) {
         UnloadRenderTexture(gScene); UnloadRenderTexture(gLight); UnloadRenderTexture(gLit);
         UnloadRenderTexture(gBloomA); UnloadRenderTexture(gBloomB); UnloadRenderTexture(gComposed);
+        UnloadRenderTexture(gNormal);
     }
     gScene = LoadRenderTexture(w, h);
     gLight = LoadRenderTexture(w, h);
     gLit = LoadRenderTexture(w, h);
     gComposed = LoadRenderTexture(w, h);
+    gNormal = LoadRenderTexture(w, h);
+    SetTextureFilter(gNormal.texture, TEXTURE_FILTER_BILINEAR);
     gBloomA = LoadRenderTexture(w / kBloomDiv, h / kBloomDiv);
     gBloomB = LoadRenderTexture(w / kBloomDiv, h / kBloomDiv);
     SetTextureFilter(gLight.texture, TEXTURE_FILTER_BILINEAR);
@@ -653,6 +707,12 @@ int main() {
     gPost = LoadShaderFromMemory(nullptr, kPostFS);
     gLocLightTex = GetShaderLocation(gComposite, "lightTex");
     gLocAmbient = GetShaderLocation(gComposite, "ambient");
+    gLocNormalTex = GetShaderLocation(gComposite, "normalTex");
+    gLocCompRes = GetShaderLocation(gComposite, "res");
+    gLocLightPos = GetShaderLocation(gComposite, "lightPos");
+    gLocLightRad = GetShaderLocation(gComposite, "lightRad");
+    gLocLightInt = GetShaderLocation(gComposite, "lightInt");
+    gLocLightCount = GetShaderLocation(gComposite, "lightCount");
     gLocDir = GetShaderLocation(gBlur, "dir");
     gLocPostRes = GetShaderLocation(gPost, "res");
     gLocPostTime = GetShaderLocation(gPost, "time");
@@ -791,6 +851,28 @@ int main() {
             // (player drawn on top after compositing so its hue stays crisp)
             EndTextureMode();
 
+            // ---- Pass 1b: surface normals (for per-pixel relief lighting) ----
+            BeginTextureMode(gNormal);
+            ClearBackground(C(128, 128, 255)); // flat normal (+Z)
+            for (int wy = y0; wy <= y1; ++wy)
+                for (int wx = x0; wx <= x1; ++wx) {
+                    const Vec2 w{wx, wy};
+                    if (!game->map().in_bounds(w) || !game->map().at(w).explored) continue;
+                    const Texture2D& nrm = game->map().at(w).type == sh::TileType::Wall ? gWallNrm : gFloorNrm;
+                    DrawTexturePro(nrm, {0, 0, (float)nrm.width, (float)nrm.height},
+                                   {(float)sx(wx), (float)sy(wy), (float)kTile, (float)kTile}, {0, 0}, 0, WHITE);
+                }
+            // flat normals under entities so they aren't lit by the floor's relief
+            for (const auto& it : game->items())
+                if (!it.taken && game->map().in_bounds(it.pos) && game->map().at(it.pos).visible)
+                    DrawCircleV(tile_center(it.pos.x, it.pos.y, camx, camy), kTile * 0.32f, C(128, 128, 255));
+            for (std::size_t i = 0; i < game->monsters().size(); ++i) {
+                const auto& m = game->monsters()[i];
+                if (m.alive && game->map().in_bounds(m.pos) && game->map().at(m.pos).visible)
+                    DrawCircleV(tile_center(anim.monR[i].x, anim.monR[i].y, camx, camy), kTile * 0.34f, C(128, 128, 255));
+            }
+            EndTextureMode();
+
             // ---- Pass 2: light buffer (FOV-accurate: one soft light per visible tile) ----
             const float flick = 0.86f + 0.14f * std::sin(anim.time * 11.0f) * std::sin(anim.time * 6.3f);
             BeginTextureMode(gLight);
@@ -827,12 +909,43 @@ int main() {
             EndBlendMode();
             EndTextureMode();
 
-            // ---- Pass 3: composite (albedo * (ambient + light) + grade) ----
+            // ---- Pass 3: composite (albedo * (ambient + normal-mapped light) + grade) ----
+            // Gather up to 8 directional lights for relief shading (torch + nearest points).
+            struct Lt { Vector2 p; float rad, inten, z; };
+            std::vector<Lt> lts;
+            const Vector2 ptc = tile_center(anim.playerR.x, anim.playerR.y, camx, camy);
+            lts.push_back({ptc, kTile * 5.5f, 1.15f, kTile * 1.25f}); // torch
+            for (const auto& it : game->items())
+                if (!it.taken && game->map().at(it.pos).visible)
+                    lts.push_back({tile_center(it.pos.x, it.pos.y, camx, camy), kTile * 2.4f, 0.5f, kTile * 0.8f});
+            if (game->map().in_bounds(game->stairs()) && game->map().at(game->stairs()).visible)
+                lts.push_back({tile_center(game->stairs().x, game->stairs().y, camx, camy), kTile * 3.0f, 0.55f, kTile * 0.8f});
+            for (const auto& m : mons)
+                if (m.alive && m.glyph == '&' && game->map().at(m.pos).visible)
+                    lts.push_back({tile_center(m.pos.x, m.pos.y, camx, camy), kTile * 3.5f, 0.6f, kTile * 0.9f});
+            if (lts.size() > 8)
+                std::partial_sort(lts.begin() + 1, lts.begin() + 8, lts.end(), [&](const Lt& a, const Lt& b) {
+                    auto d2 = [&](const Lt& l) { return (l.p.x - ptc.x) * (l.p.x - ptc.x) + (l.p.y - ptc.y) * (l.p.y - ptc.y); };
+                    return d2(a) < d2(b);
+                });
+            const int nL = std::min<int>(8, (int)lts.size());
+            float lp[24] = {0}, lr[8] = {0}, li[8] = {0};
+            for (int i = 0; i < nL; ++i) {
+                lp[i * 3] = lts[i].p.x; lp[i * 3 + 1] = lts[i].p.y; lp[i * 3 + 2] = lts[i].z;
+                lr[i] = lts[i].rad; li[i] = lts[i].inten;
+            }
             const float ambient[3] = {0.16f, 0.19f, 0.30f};
+            const float compRes[2] = {(float)mapAreaW, (float)H};
             BeginTextureMode(gLit);
             BeginShaderMode(gComposite);
             SetShaderValueTexture(gComposite, gLocLightTex, gLight.texture);
+            SetShaderValueTexture(gComposite, gLocNormalTex, gNormal.texture);
             SetShaderValue(gComposite, gLocAmbient, ambient, SHADER_UNIFORM_VEC3);
+            SetShaderValue(gComposite, gLocCompRes, compRes, SHADER_UNIFORM_VEC2);
+            SetShaderValueV(gComposite, gLocLightPos, lp, SHADER_UNIFORM_VEC3, nL);
+            SetShaderValueV(gComposite, gLocLightRad, lr, SHADER_UNIFORM_FLOAT, nL);
+            SetShaderValueV(gComposite, gLocLightInt, li, SHADER_UNIFORM_FLOAT, nL);
+            SetShaderValue(gComposite, gLocLightCount, &nL, SHADER_UNIFORM_INT);
             DrawTexture(gScene.texture, 0, 0, WHITE);
             EndShaderMode();
             EndTextureMode();
@@ -841,7 +954,8 @@ int main() {
             const float bw = (float)gBloomA.texture.width, bh = (float)gBloomA.texture.height;
             BeginTextureMode(gBloomA);
             ClearBackground(BLACK);
-            DrawTexturePro(gLight.texture, {0, 0, (float)mapAreaW, -(float)H}, {0, 0, bw, bh}, {0, 0}, 0, WHITE);
+            // Bloom the lit scene (black in the void) so glow never floats in empty space.
+            DrawTexturePro(gLit.texture, {0, 0, (float)mapAreaW, -(float)H}, {0, 0, bw, bh}, {0, 0}, 0, WHITE);
             EndTextureMode();
             const float dh[2] = {1.0f / bw, 0.0f}, dv[2] = {0.0f, 1.0f / bh};
             BeginTextureMode(gBloomB);
@@ -864,7 +978,7 @@ int main() {
             ClearBackground(BLACK);
             DrawTextureRec(gLit.texture, {0, 0, (float)mapAreaW, (float)H}, {0, 0}, WHITE);
             BeginBlendMode(BLEND_ADDITIVE);
-            DrawTexturePro(gBloomA.texture, {0, 0, bw, bh}, {0, 0, (float)mapAreaW, (float)H}, {0, 0}, 0, Fade(WHITE, 0.45f));
+            DrawTexturePro(gBloomA.texture, {0, 0, bw, bh}, {0, 0, (float)mapAreaW, (float)H}, {0, 0}, 0, Fade(WHITE, 0.34f));
             EndBlendMode();
             EndTextureMode();
         }
@@ -960,9 +1074,11 @@ int main() {
     if (gRtW != 0) {
         UnloadRenderTexture(gScene); UnloadRenderTexture(gLight); UnloadRenderTexture(gLit);
         UnloadRenderTexture(gBloomA); UnloadRenderTexture(gBloomB); UnloadRenderTexture(gComposed);
+        UnloadRenderTexture(gNormal);
     }
     UnloadShader(gComposite); UnloadShader(gBlur); UnloadShader(gPost);
     UnloadTexture(gFloorTex); UnloadTexture(gWallTex); UnloadTexture(gLightTex);
+    UnloadTexture(gFloorNrm); UnloadTexture(gWallNrm);
     UnloadFont(gFont);
     CloseWindow();
     return 0;

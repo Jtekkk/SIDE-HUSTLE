@@ -51,9 +51,12 @@ The renderer is a small **deferred-style 2D lighting pipeline** with GLSL shader
 - **Procedural HD textures** — stone floors (cellular noise) and rough rock walls
   (Perlin noise) generated at startup, plus 2.5D wall blocks with lit top edges
   and dark front faces for real depth.
-- **Per-pixel dynamic lighting** — a light buffer is accumulated with one soft
-  light per *visible* tile (so walls actually occlude light), plus point lights
-  for items, stairs, the boss, combat sparks, and a flickering player torch.
+- **Normal-mapped per-pixel dynamic lighting** — normal maps are derived from
+  the noise heightfields so floors and walls catch the torch with real relief.
+  A light buffer is accumulated with one soft light per *visible* tile (so walls
+  actually occlude light), and the composite shader adds directional shading
+  from up to 8 lights (a flickering player torch + nearest item/stairs/boss
+  lights), gated by the occluded light so shadows are preserved.
 - **Composite shader** — `albedo × (ambient + light)` with a filmic tonemap,
   saturation lift, and vignette; explored-but-unseen tiles fall back to a cool
   ambient (the classic warm-light / cool-shadow look).
