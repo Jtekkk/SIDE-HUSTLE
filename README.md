@@ -138,6 +138,10 @@ Techniques on display:
   `std::hash<Vec2>` specialization lets it key the A* `unordered_map`/`set`.
 - **Algorithms & ranges**: `std::clamp`, `std::ranges::count_if`,
   `std::priority_queue`, `<random>` distributions.
+- **24-bit "truecolor" renderer** with distance-based FOV light falloff
+  (`core/Ansi.hpp` does the RGB lerp/scale math), Unicode shaded walls and a
+  box-drawing UI frame, plus a gradient HP bar. Best in a truecolor terminal
+  (most modern ones, incl. Windows Terminal); UTF-8 output is handled per-OS.
 - **`std::filesystem` + `std::fstream`** persist the high-score table, with a
   round-tripping text format and graceful handling of a missing/corrupt file.
 - **`std::format`** builds every HUD, menu and log line; **designated

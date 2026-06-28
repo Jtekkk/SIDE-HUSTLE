@@ -14,6 +14,7 @@
 #include <string>
 #include <system_error>
 
+#include "../core/Ansi.hpp"
 #include "../core/Terminal.hpp"
 #include "../world/Fov.hpp"
 #include "../world/Pathfinding.hpp"
@@ -110,6 +111,42 @@ Entity make_boss(Vec2 pos, Difficulty diff) {
     e.xp_reward = 200;
     return e;
 }
+
+// Map the legacy ANSI colour codes stored on entities/items to RGB so the
+// renderer can light and blend them uniformly.
+ansi::Rgb code_to_rgb(int code) {
+    switch (code) {
+        case 31: return {220, 70, 70};    // client
+        case 32: return {90, 200, 90};    // bug
+        case 33: return {235, 200, 80};   // cash
+        case 35: return {200, 110, 200};  // recruiter
+        case 36: return {90, 205, 215};   // coffee
+        case 91: return {255, 95, 95};    // manager
+        case 95: return {240, 120, 240};  // CEO
+        case 97: return {245, 245, 245};  // upgrade / stairs
+        default: return {220, 220, 220};
+    }
+}
+
+// Unicode glyphs for the terrain (all single terminal columns).
+constexpr const char* kWallGlyph = "▒";   // ▒ medium shade
+constexpr const char* kFloorGlyph = "·";  // · middle dot
+
+// Box-drawing pieces for the UI frame.
+constexpr const char* kTL = "╭"; // ╭
+constexpr const char* kTR = "╮"; // ╮
+constexpr const char* kBL = "╰"; // ╰
+constexpr const char* kBR = "╯"; // ╯
+constexpr const char* kHbar = "─"; // ─
+constexpr const char* kVbar = "│"; // │
+
+// Palette.
+constexpr ansi::Rgb kWallLit{150, 134, 110};
+constexpr ansi::Rgb kFloorLit{96, 88, 78};
+constexpr ansi::Rgb kMemory{52, 58, 82};   // explored-but-unseen "memory"
+constexpr ansi::Rgb kStairs{255, 226, 120};
+constexpr ansi::Rgb kFrame{96, 110, 140};
+constexpr ansi::Rgb kPlayer{255, 232, 120};
 
 } // namespace
 
@@ -401,131 +438,203 @@ std::string Game::cell_str(Vec2 world) const {
     const Tile& t = map_.at(world);
     if (!t.explored) return " ";
 
-    char ch = ' ';
-    int color = 90;
-    switch (t.type) {
-        case TileType::Wall:       ch = '#'; color = t.visible ? 37 : 90; break;
-        case TileType::Floor:      ch = '.'; color = t.visible ? 37 : 90; break;
-        case TileType::StairsDown: ch = '>'; color = t.visible ? 97 : 90; break;
+    // Out-of-sight but remembered: a flat, cool "memory" tint.
+    if (!t.visible) {
+        const char* g = t.type == TileType::Wall ? kWallGlyph
+                       : t.type == TileType::StairsDown ? ">"
+                                                        : kFloorGlyph;
+        return ansi::fg(kMemory) + g;
     }
 
-    if (t.visible) {
-        if (world == player_.pos) {
-            ch = player_.glyph;
-            color = player_.color;
-        } else {
-            const Entity* mm = nullptr;
-            for (const auto& m : monsters_) {
-                if (m.alive && m.pos == world) { mm = &m; break; }
-            }
-            if (mm != nullptr) {
-                ch = mm->glyph;
-                color = mm->color;
-            } else {
-                const Item* ii = nullptr;
-                for (const auto& it : items_) {
-                    if (!it.taken && it.pos == world) { ii = &it; break; }
-                }
-                if (ii != nullptr) {
-                    ch = ii->glyph;
-                    color = ii->color;
-                }
-            }
+    // Smooth light falloff with distance from the player.
+    const double dist = static_cast<double>(world.chebyshev(player_.pos));
+    const double t01 = fov_radius_ > 0 ? std::clamp(dist / fov_radius_, 0.0, 1.0) : 0.0;
+    const double light = 1.0 - 0.55 * t01;
+
+    // Player.
+    if (world == player_.pos) {
+        return ansi::bold + ansi::fg(kPlayer) + std::string{player_.glyph};
+    }
+    // Monster (drawn bright so it pops against the lit floor).
+    for (const auto& m : monsters_) {
+        if (m.alive && m.pos == world) {
+            const ansi::Rgb c = ansi::scale(code_to_rgb(m.color), std::max(light, 0.8));
+            return ansi::bold + ansi::fg(c) + std::string{m.glyph};
+        }
+    }
+    // Item.
+    for (const auto& it : items_) {
+        if (!it.taken && it.pos == world) {
+            const ansi::Rgb c = ansi::scale(code_to_rgb(it.color), std::max(light, 0.85));
+            return ansi::bold + ansi::fg(c) + std::string{it.glyph};
         }
     }
 
-    return std::format("\x1b[{}m{}", color, ch);
+    // Terrain.
+    switch (t.type) {
+        case TileType::StairsDown:
+            return ansi::bold + ansi::fg(ansi::scale(kStairs, light)) + ">";
+        case TileType::Wall:
+            return ansi::fg(ansi::scale(kWallLit, light)) + kWallGlyph;
+        case TileType::Floor:
+            break;
+    }
+    return ansi::fg(ansi::scale(kFloorLit, light)) + kFloorGlyph;
 }
 
 std::string Game::hud_str() const {
+    using ansi::Rgb;
     const int hp = std::max(0, player_.combat.hp);
-    const int mhp = player_.combat.max_hp;
-    constexpr int bar_len = 20;
-    const int filled = std::clamp(mhp > 0 ? hp * bar_len / mhp : 0, 0, bar_len);
-    std::string bar(static_cast<std::size_t>(filled), '#');
-    bar.append(static_cast<std::size_t>(bar_len - filled), '-');
+    const int mhp = std::max(1, player_.combat.max_hp);
+    const double ratio = std::clamp(static_cast<double>(hp) / mhp, 0.0, 1.0);
 
-    std::string s = "\x1b[0m\r\n";
-    s += std::format("\x1b[91mHP\x1b[0m [\x1b[92m{}\x1b[0m] {}/{}   ", bar, hp, mhp);
-    s += std::format("\x1b[93mFloor\x1b[0m {}   \x1b[93mLvl\x1b[0m {} (xp {}/{})   "
-                     "\x1b[93m$\x1b[0m{}   \x1b[36mcoffee\x1b[0m x{}\r\n",
-                     depth_, level_, xp_, xp_next_, cash_, coffees_);
+    const Rgb green{90, 210, 90};
+    const Rgb yellow{235, 205, 80};
+    const Rgb red{230, 70, 70};
+    const Rgb hpcol = ratio >= 0.5 ? ansi::lerp(yellow, green, (ratio - 0.5) * 2.0)
+                                   : ansi::lerp(red, yellow, ratio * 2.0);
+
+    const Rgb label{150, 162, 190};
+    const Rgb value{226, 231, 242};
+    const Rgb dim{74, 80, 98};
+
+    constexpr int bar_len = 24;
+    const int filled = std::clamp(static_cast<int>(ratio * bar_len + 0.5), 0, bar_len);
+
+    std::string s = std::string{ansi::reset} + "\r\n";
+
+    // HP bar.
+    s += " " + ansi::fg(label) + "HP " + ansi::fg(hpcol) + ansi::repeat("█", filled);
+    s += ansi::fg(dim) + ansi::repeat("░", bar_len - filled);
+    s += ansi::fg(value) + std::format(" {}/{}", hp, mhp) + ansi::reset + "\r\n";
+
+    // Stats line.
+    s += " ";
+    s += ansi::fg(label) + "Floor " + ansi::fg(value) + std::format("{}", depth_) + "  ";
+    s += ansi::fg(label) + "Lvl " + ansi::fg(value) + std::format("{}", level_)
+       + ansi::fg(dim) + std::format(" ({}/{} xp)", xp_, xp_next_) + "  ";
+    s += ansi::fg(yellow) + std::format("${}", cash_) + "  ";
+    s += ansi::fg(Rgb{90, 205, 215}) + std::format("coffee x{}", coffees_) + ansi::reset + "\r\n";
+
+    // Message log (latest brightest).
     s += "\r\n";
-    for (const auto& m : log_) s += "  " + m + "\r\n";
-    s += "\r\n\x1b[90mmove wasd/hjkl/arrows  diag yubn  coffee e  wait .  descend >  quit q\x1b[0m\r\n";
+    const int n = static_cast<int>(log_.size());
+    int idx = 0;
+    for (const auto& m : log_) {
+        const bool latest = (++idx == n);
+        const Rgb mc = latest ? Rgb{216, 223, 236} : Rgb{138, 146, 166};
+        s += " " + ansi::fg(mc) + "› " + m + ansi::reset + "\r\n";
+    }
+
+    s += "\r\n " + ansi::fg(dim) +
+         "move wasd/hjkl/arrows · diag yubn · coffee e · wait . · descend > · quit q" +
+         ansi::reset + "\r\n";
     return s;
 }
 
 std::string Game::scoreboard_str() const {
-    std::string s = "\x1b[97m   Top side hustles\x1b[0m\r\n";
+    using ansi::Rgb;
     const auto& entries = high_scores_.entries();
+    std::string s = "  " + ansi::fg(Rgb{150, 162, 190}) + "Top side hustles" + ansi::reset + "\r\n";
     if (entries.empty()) {
-        s += "\x1b[90m   (none yet — be the first)\x1b[0m\r\n";
+        s += "  " + ansi::fg(Rgb{100, 108, 130}) + "(none yet — be the first)" + ansi::reset + "\r\n";
         return s;
     }
-    int rank = 1;
+    const Rgb medal[3] = {{255, 215, 90}, {198, 204, 216}, {200, 140, 80}};
+    int rank = 0;
     for (const auto& e : entries) {
-        s += std::format("\x1b[90m{:>2}.\x1b[0m \x1b[93m{:>6}\x1b[0m  {:<10} "
-                         "\x1b[90mfloor {} lvl {} ${}{}\x1b[0m\r\n",
-                         rank++, e.score, e.name, e.depth, e.level, e.cash,
-                         e.won ? " WON" : "");
+        const Rgb rc = rank < 3 ? medal[rank] : Rgb{120, 128, 150};
+        s += "  " + ansi::fg(rc) + std::format("{:>2}. ", rank + 1)
+           + ansi::fg(Rgb{235, 235, 245}) + std::format("{:>6}", e.score)
+           + ansi::fg(Rgb{170, 178, 198}) + std::format("  {:<12}", e.name)
+           + ansi::fg(Rgb{120, 128, 150}) + std::format("floor {} · lvl {} · ${}", e.depth, e.level, e.cash)
+           + (e.won ? ansi::fg(Rgb{110, 225, 120}) + "  WON" : std::string{})
+           + ansi::reset + "\r\n";
+        ++rank;
     }
     return s;
 }
 
 std::string Game::render_title() const {
-    std::string s = "\x1b[2J\x1b[H\x1b[0m\r\n";
-    s += "\x1b[93m   ____  _     _        _   _           _   _      \x1b[0m\r\n";
-    s += "\x1b[93m  / ___|(_) __| | ___  | | | |_   _ ___| |_| | ___ \x1b[0m\r\n";
-    s += "\x1b[93m  \\___ \\| |/ _` |/ _ \\ | |_| | | | / __| __| |/ _ \\\x1b[0m\r\n";
-    s += "\x1b[93m   ___) | | (_| |  __/ |  _  | |_| \\__ \\ |_| |  __/\x1b[0m\r\n";
-    s += "\x1b[93m  |____/|_|\\__,_|\\___| |_| |_|\\__,_|___/\\__|_|\\___|\x1b[0m\r\n";
-    s += "\r\n\x1b[90m   A corporate dungeon crawl in modern C++.\x1b[0m\r\n";
+    using ansi::Rgb;
+    static const char* const banner[5] = {
+        "   ____  _     _        _   _           _   _      ",
+        "  / ___|(_) __| | ___  | | | |_   _ ___| |_| | ___ ",
+        "  \\___ \\| |/ _` |/ _ \\ | |_| | | | / __| __| |/ _ \\",
+        "   ___) | | (_| |  __/ |  _  | |_| \\__ \\ |_| |  __/",
+        "  |____/|_|\\__,_|\\___| |_| |_|\\__,_|___/\\__|_|\\___|",
+    };
+
+    std::string s = "\x1b[2J\x1b[H";
+    s += std::string{ansi::reset} + "\r\n";
+    for (int i = 0; i < 5; ++i) {
+        const Rgb c = ansi::lerp(Rgb{255, 214, 92}, Rgb{255, 150, 46}, i / 4.0);
+        s += std::string{ansi::bold} + ansi::fg(c) + banner[i] + ansi::reset + "\r\n";
+    }
+    s += "\r\n  " + ansi::fg(Rgb{150, 160, 185}) +
+         "A corporate dungeon crawl in modern C++." + ansi::reset + "\r\n";
     const char* diff = config_.difficulty == Difficulty::Easy   ? "Easy"
                       : config_.difficulty == Difficulty::Hard  ? "Hard"
                                                                 : "Normal";
-    s += std::format("\x1b[90m   Difficulty: {}   Floors: {}\x1b[0m\r\n\r\n", diff, kMaxDepth);
+    s += "  " + ansi::fg(Rgb{110, 120, 145}) +
+         std::format("Difficulty: {}   Floors: {}", diff, kMaxDepth) + ansi::reset + "\r\n\r\n";
     s += scoreboard_str();
-    s += "\r\n\x1b[97m   Press any key to start";
-    s += "\x1b[90m  (q to quit)\x1b[0m\r\n";
+    s += "\r\n  " + std::string{ansi::bold} + ansi::fg(Rgb{230, 235, 245}) + "Press any key to start" +
+         ansi::reset + ansi::fg(Rgb{110, 120, 145}) + "   (q to quit)" + ansi::reset + "\r\n";
     return s;
 }
 
 std::string Game::render_frame() const {
+    using ansi::Rgb;
     const int cam_x = std::clamp(player_.pos.x - kViewW / 2, 0, std::max(0, map_.width() - kViewW));
     const int cam_y = std::clamp(player_.pos.y - kViewH / 2, 0, std::max(0, map_.height() - kViewH));
 
+    constexpr int W = kViewW;
+    const std::string frame = ansi::fg(kFrame);
+    const std::string title = std::string{ansi::bold} + ansi::fg(Rgb{255, 232, 120}) + " SIDE HUSTLE ";
+
     std::string out;
-    out.reserve(static_cast<std::size_t>(kViewW) * kViewH * 6);
-    out += "\x1b[0m\x1b[97m  SIDE HUSTLE \x1b[90m— a corporate dungeon crawl\x1b[0m\r\n";
+    out.reserve(static_cast<std::size_t>(W) * kViewH * 24);
+    out += ansi::reset;
+
+    // Top border with an inset title (" SIDE HUSTLE " spans 13 columns).
+    out += frame + kTL + ansi::repeat(kHbar, 2) + title + frame + ansi::repeat(kHbar, W - 2 - 13) +
+           kTR + ansi::reset + "\r\n";
 
     for (int sy = 0; sy < kViewH; ++sy) {
-        for (int sx = 0; sx < kViewW; ++sx) {
-            out += cell_str({cam_x + sx, cam_y + sy});
-        }
-        out += "\x1b[0m\r\n";
+        out += frame + kVbar + ansi::reset;
+        for (int sx = 0; sx < W; ++sx) out += cell_str({cam_x + sx, cam_y + sy});
+        out += std::string{ansi::reset} + frame + kVbar + ansi::reset + "\r\n";
     }
 
+    out += frame + kBL + ansi::repeat(kHbar, W) + kBR + ansi::reset + "\r\n";
+
     out += hud_str();
-    out += "\x1b[0m\x1b[J"; // reset + erase anything left from a taller frame
+    out += std::string{ansi::reset} + "\x1b[J"; // erase anything left from a taller frame
     return out;
 }
 
 std::string Game::render_end() const {
-    std::string s = "\x1b[2J\x1b[H\x1b[0m\r\n";
+    using ansi::Rgb;
+    std::string s = "\x1b[2J\x1b[H";
+    s += std::string{ansi::reset} + "\r\n";
     if (state_ == State::Dead) {
-        s += "\x1b[91m   GAME OVER — the grind got you.\x1b[0m\r\n";
+        s += "  " + std::string{ansi::bold} + ansi::fg(Rgb{235, 80, 80}) +
+             "GAME OVER — the grind got you." + ansi::reset + "\r\n";
     } else {
-        s += "\x1b[92m   YOU WIN — you escaped and went full-time on your side hustle!\x1b[0m\r\n";
+        s += "  " + std::string{ansi::bold} + ansi::fg(Rgb{110, 225, 120}) +
+             "YOU WIN — you went full-time on your side hustle!" + ansi::reset + "\r\n";
     }
-    s += std::format("\r\n   Reached floor {}, level {}, with ${} banked.\r\n", depth_, level_, cash_);
-    s += std::format("\x1b[93m   Final score: {}\x1b[0m\r\n", score());
-    if (high_scores_.entries().size() == 1 ||
-        (!high_scores_.entries().empty() && high_scores_.entries().front().score == score())) {
-        s += "\x1b[92m   A new top score!\x1b[0m\r\n";
+    s += "\r\n  " + ansi::fg(Rgb{200, 206, 220}) +
+         std::format("Reached floor {}, level {}, with ${} banked.", depth_, level_, cash_) +
+         ansi::reset + "\r\n";
+    s += "  " + std::string{ansi::bold} + ansi::fg(Rgb{235, 205, 80}) +
+         std::format("Final score: {}", score()) + ansi::reset + "\r\n";
+    if (!high_scores_.entries().empty() && high_scores_.entries().front().score == score()) {
+        s += "  " + ansi::fg(Rgb{110, 225, 120}) + "★ A new top score!" + ansi::reset + "\r\n";
     }
     s += "\r\n" + scoreboard_str();
-    s += "\r\n   Press any key to exit.\r\n";
+    s += "\r\n  " + ansi::fg(Rgb{150, 160, 185}) + "Press any key to exit." + ansi::reset + "\r\n";
     return s;
 }
 

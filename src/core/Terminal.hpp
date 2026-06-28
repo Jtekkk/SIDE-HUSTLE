@@ -7,6 +7,7 @@
 // broken. Only this file is platform-specific — the rest of the game is pure
 // standard C++.
 //
+#include <string>
 #include <string_view>
 
 namespace sh {
@@ -53,6 +54,8 @@ public:
             ::SetConsoleMode(h_in_, orig_in_ & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT |
                                                  ENABLE_PROCESSED_INPUT));
         }
+        orig_cp_ = ::GetConsoleOutputCP();
+        ::SetConsoleOutputCP(CP_UTF8); // so our UTF-8 frames render correctly
         write_raw("\x1b[?25l\x1b[2J\x1b[H"); // hide cursor, clear, home
     }
 
@@ -88,23 +91,31 @@ private:
         write_raw("\x1b[0m\x1b[?25h\x1b[2J\x1b[H");
         if (has_out_) ::SetConsoleMode(h_out_, orig_out_);
         if (has_in_) ::SetConsoleMode(h_in_, orig_in_);
+        if (orig_cp_ != 0) ::SetConsoleOutputCP(orig_cp_);
         restored_ = true;
     }
 
     static void write_raw(std::string_view s) {
         HANDLE h = ::GetStdHandle(STD_OUTPUT_HANDLE);
         DWORD written = 0;
-        // WriteConsoleA only works on a real console handle; if stdout is
-        // redirected to a file or pipe, fall back to a raw byte write.
-        if (!::WriteConsoleA(h, s.data(), static_cast<DWORD>(s.size()), &written, nullptr)) {
-            ::WriteFile(h, s.data(), static_cast<DWORD>(s.size()), &written, nullptr);
+        // On a real console, translate our UTF-8 bytes to UTF-16 and use the
+        // wide write so multibyte glyphs render correctly. If stdout is
+        // redirected to a file/pipe, fall back to emitting the raw UTF-8 bytes.
+        const int wlen =
+            ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+        if (wlen > 0) {
+            std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
+            ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), wide.data(), wlen);
+            if (::WriteConsoleW(h, wide.data(), static_cast<DWORD>(wlen), &written, nullptr)) return;
         }
+        ::WriteFile(h, s.data(), static_cast<DWORD>(s.size()), &written, nullptr);
     }
 
     HANDLE h_out_{};
     HANDLE h_in_{};
     DWORD orig_out_{};
     DWORD orig_in_{};
+    unsigned int orig_cp_{0};
     bool has_out_{false};
     bool has_in_{false};
     bool restored_{false};
