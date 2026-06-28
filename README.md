@@ -60,8 +60,11 @@ The renderer is a small **deferred-style 2D lighting pipeline** with GLSL shader
 - **Composite shader** — `albedo × (ambient + light)` with a filmic tonemap,
   saturation lift, and vignette; explored-but-unseen tiles fall back to a cool
   ambient (the classic warm-light / cool-shadow look).
-- **Bloom** — the light buffer is downsampled and run through a separable
-  gaussian blur (shader) for glow.
+- **Bloom** — the lit scene is downsampled and run through a separable gaussian
+  blur (shader) for glow.
+- **Volumetric light shafts (god-rays)** — a radial-blur shader with a
+  bright-pass casts soft shafts from the torch, plus drifting **dust motes** in
+  the torchlight.
 - Smooth fractional-scroll camera, tweened movement + idle-bob, a particle
   system, floating damage numbers, mipmapped TrueType text, and shaded sprites
   with outlines and eyes. The cyan hero is hue-separated from gold loot and warm

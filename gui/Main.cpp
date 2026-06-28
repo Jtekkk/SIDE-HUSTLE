@@ -108,6 +108,36 @@ void main() {
 }
 )GLSL";
 
+const char* kGodFS = R"GLSL(
+#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;   // lit scene (bright = light)
+uniform vec2 lightUV;
+uniform float decay;
+uniform float density;
+uniform float weight;
+uniform float exposure;
+out vec4 finalColor;
+void main() {
+    const int N = 24;
+    vec2 uv = fragTexCoord;
+    vec2 delta = (uv - lightUV) * (density / float(N));
+    vec3 col = vec3(0.0);
+    float illum = 1.0;
+    vec2 p = uv;
+    for (int i = 0; i < N; ++i) {
+        p -= delta;
+        // bright-pass: only highlights cast shafts, so this reads as light
+        // shafts rather than an overall wash.
+        vec3 s = max(texture(texture0, p).rgb - vec3(0.45), vec3(0.0));
+        col += s * illum * weight;
+        illum *= decay;
+    }
+    finalColor = vec4(col * exposure, 1.0);
+}
+)GLSL";
+
 const char* kPostFS = R"GLSL(
 #version 330
 in vec2 fragTexCoord;
@@ -144,12 +174,13 @@ void main() {
 // ===========================================================================
 Font gFont{};
 Texture2D gFloorTex{}, gWallTex{}, gLightTex{}, gFloorNrm{}, gWallNrm{};
-Shader gComposite{}, gBlur{}, gPost{};
+Shader gComposite{}, gBlur{}, gPost{}, gGod{};
 int gLocLightTex = 0, gLocAmbient = 0, gLocDir = 0;
 int gLocPostRes = 0, gLocPostTime = 0;
 int gLocNormalTex = 0, gLocCompRes = 0, gLocLightPos = 0, gLocLightRad = 0, gLocLightInt = 0, gLocLightCount = 0;
+int gLocGodLightUV = 0, gLocGodDecay = 0, gLocGodDensity = 0, gLocGodWeight = 0, gLocGodExposure = 0;
 
-RenderTexture2D gScene{}, gLight{}, gLit{}, gBloomA{}, gBloomB{}, gComposed{}, gNormal{};
+RenderTexture2D gScene{}, gLight{}, gLit{}, gBloomA{}, gBloomB{}, gComposed{}, gNormal{}, gRay{};
 int gRtW = 0, gRtH = 0;
 constexpr int kBloomDiv = 3; // bloom buffers at 1/3 res
 
@@ -210,7 +241,7 @@ void dtcsh(const char* s, float cx, float y, float size, Color c, Color sh = C(0
 }
 
 // ---- particles & floating text --------------------------------------------
-struct Particle { Vector2 pos, vel; float life, max, size; Color col; bool gravity; };
+struct Particle { Vector2 pos, vel; float life, max, size; Color col; bool gravity; bool dust = false; };
 struct FloatTxt { Vector2 pos; std::string text; float life, max, size; Color col; };
 std::vector<Particle> gParticles;
 std::vector<FloatTxt> gFloats;
@@ -233,7 +264,7 @@ void update_particles(float dt) {
     for (auto& p : gParticles) {
         p.pos.x += p.vel.x * dt; p.pos.y += p.vel.y * dt;
         if (p.gravity) p.vel.y += 320.0f * dt;
-        p.vel.x *= (1.0f - 2.2f * dt);
+        if (!p.dust) p.vel.x *= (1.0f - 2.2f * dt); // dust keeps its gentle drift
         p.life -= dt;
     }
     std::erase_if(gParticles, [](const Particle& p) { return p.life <= 0.0f; });
@@ -672,7 +703,7 @@ void ensure_targets(int w, int h) {
     if (gRtW != 0) {
         UnloadRenderTexture(gScene); UnloadRenderTexture(gLight); UnloadRenderTexture(gLit);
         UnloadRenderTexture(gBloomA); UnloadRenderTexture(gBloomB); UnloadRenderTexture(gComposed);
-        UnloadRenderTexture(gNormal);
+        UnloadRenderTexture(gNormal); UnloadRenderTexture(gRay);
     }
     gScene = LoadRenderTexture(w, h);
     gLight = LoadRenderTexture(w, h);
@@ -682,10 +713,12 @@ void ensure_targets(int w, int h) {
     SetTextureFilter(gNormal.texture, TEXTURE_FILTER_BILINEAR);
     gBloomA = LoadRenderTexture(w / kBloomDiv, h / kBloomDiv);
     gBloomB = LoadRenderTexture(w / kBloomDiv, h / kBloomDiv);
+    gRay = LoadRenderTexture(w / kBloomDiv, h / kBloomDiv);
     SetTextureFilter(gLight.texture, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(gComposed.texture, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(gBloomA.texture, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(gBloomB.texture, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(gRay.texture, TEXTURE_FILTER_BILINEAR);
     gRtW = w; gRtH = h;
 }
 
@@ -705,6 +738,12 @@ int main() {
     gComposite = LoadShaderFromMemory(nullptr, kCompositeFS);
     gBlur = LoadShaderFromMemory(nullptr, kBlurFS);
     gPost = LoadShaderFromMemory(nullptr, kPostFS);
+    gGod = LoadShaderFromMemory(nullptr, kGodFS);
+    gLocGodLightUV = GetShaderLocation(gGod, "lightUV");
+    gLocGodDecay = GetShaderLocation(gGod, "decay");
+    gLocGodDensity = GetShaderLocation(gGod, "density");
+    gLocGodWeight = GetShaderLocation(gGod, "weight");
+    gLocGodExposure = GetShaderLocation(gGod, "exposure");
     gLocLightTex = GetShaderLocation(gComposite, "lightTex");
     gLocAmbient = GetShaderLocation(gComposite, "ambient");
     gLocNormalTex = GetShaderLocation(gComposite, "normalTex");
@@ -816,6 +855,16 @@ int main() {
                               std::max(0.0f, (float)game->map().height() - rowsF));
             sync_fx(*game, anim, dt, camx, camy);
 
+            // Ambient dust motes drifting through the torchlight.
+            if (frand() < 0.6f) {
+                const Vector2 pc = tile_center(anim.playerR.x, anim.playerR.y, camx, camy);
+                const float ang = frand(0.0f, 6.2831853f), rad = frand(0.0f, kTile * 5.0f);
+                const Vector2 dp{pc.x + std::cos(ang) * rad, pc.y + std::sin(ang) * rad};
+                const float life = frand(3.5f, 6.5f);
+                gParticles.push_back({dp, {frand(-7.0f, 7.0f), frand(-12.0f, -3.0f)}, life, life,
+                                      frand(1.0f, 1.9f), C(150, 132, 96), false, true});
+            }
+
             const int x0 = (int)camx - 1, x1 = (int)(camx + colsF) + 2;
             const int y0 = (int)camy - 1, y1 = (int)(camy + rowsF) + 2;
             auto sx = [&](float wx) { return (int)lroundf((wx - camx) * kTile); };
@@ -901,8 +950,9 @@ int main() {
             }
             // player torch
             add_light(tile_center(anim.playerR.x, anim.playerR.y, camx, camy), kTile * 2.2f * flick, C(255, 198, 128), 0.42f);
-            // particle sparks emit light
+            // particle sparks emit light (dust does not)
             for (const auto& p : gParticles) {
+                if (p.dust) continue;
                 const float a = std::clamp(p.life / p.max, 0.0f, 1.0f);
                 add_light(p.pos, kTile * 0.55f, p.col, 0.35f * a);
             }
@@ -971,7 +1021,23 @@ int main() {
             EndShaderMode();
             EndTextureMode();
 
-            // ---- Pass 5: compose lit + bloom into one buffer for post-processing ----
+            // ---- Pass 4b: volumetric light shafts (god-rays) radiating from the torch ----
+            const float rayW = (float)gRay.texture.width, rayH = (float)gRay.texture.height;
+            const float godUV[2] = {ptc.x / (float)mapAreaW, ptc.y / (float)H};
+            const float godDecay = 0.95f, godDensity = 0.7f, godWeight = 0.5f, godExposure = 0.7f;
+            BeginTextureMode(gRay);
+            ClearBackground(BLACK);
+            BeginShaderMode(gGod);
+            SetShaderValue(gGod, gLocGodLightUV, godUV, SHADER_UNIFORM_VEC2);
+            SetShaderValue(gGod, gLocGodDecay, &godDecay, SHADER_UNIFORM_FLOAT);
+            SetShaderValue(gGod, gLocGodDensity, &godDensity, SHADER_UNIFORM_FLOAT);
+            SetShaderValue(gGod, gLocGodWeight, &godWeight, SHADER_UNIFORM_FLOAT);
+            SetShaderValue(gGod, gLocGodExposure, &godExposure, SHADER_UNIFORM_FLOAT);
+            DrawTexturePro(gLit.texture, {0, 0, (float)mapAreaW, -(float)H}, {0, 0, rayW, rayH}, {0, 0}, 0, WHITE);
+            EndShaderMode();
+            EndTextureMode();
+
+            // ---- Pass 5: compose lit + bloom + god-rays into one buffer for post ----
             // (inner blits use positive height; the single outer flip at present time
             //  gives correct screen orientation.)
             BeginTextureMode(gComposed);
@@ -979,6 +1045,7 @@ int main() {
             DrawTextureRec(gLit.texture, {0, 0, (float)mapAreaW, (float)H}, {0, 0}, WHITE);
             BeginBlendMode(BLEND_ADDITIVE);
             DrawTexturePro(gBloomA.texture, {0, 0, bw, bh}, {0, 0, (float)mapAreaW, (float)H}, {0, 0}, 0, Fade(WHITE, 0.34f));
+            DrawTexturePro(gRay.texture, {0, 0, rayW, rayH}, {0, 0, (float)mapAreaW, (float)H}, {0, 0}, 0, Fade(WHITE, 0.5f));
             EndBlendMode();
             EndTextureMode();
         }
@@ -1074,9 +1141,9 @@ int main() {
     if (gRtW != 0) {
         UnloadRenderTexture(gScene); UnloadRenderTexture(gLight); UnloadRenderTexture(gLit);
         UnloadRenderTexture(gBloomA); UnloadRenderTexture(gBloomB); UnloadRenderTexture(gComposed);
-        UnloadRenderTexture(gNormal);
+        UnloadRenderTexture(gNormal); UnloadRenderTexture(gRay);
     }
-    UnloadShader(gComposite); UnloadShader(gBlur); UnloadShader(gPost);
+    UnloadShader(gComposite); UnloadShader(gBlur); UnloadShader(gPost); UnloadShader(gGod);
     UnloadTexture(gFloorTex); UnloadTexture(gWallTex); UnloadTexture(gLightTex);
     UnloadTexture(gFloorNrm); UnloadTexture(gWallNrm);
     UnloadFont(gFont);
