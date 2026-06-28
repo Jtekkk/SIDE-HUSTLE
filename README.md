@@ -46,12 +46,23 @@ Requires a C++23 compiler (GCC 13+ or Clang 17+).
 
 ### Graphical version (raylib)
 
-The renderer features 2.5D wall blocks with bevels and drop shadows, per-tile
-floor variation + ambient occlusion, a smooth fractional-scroll camera, tweened
-entity movement with idle-bob, soft dynamic lighting + an edge vignette, a
-particle system (hit sparks, coin/level-up bursts), floating damage numbers, and
-crisp embedded-TrueType text. Monsters and items are drawn as shaped, shaded
-sprites with outlines and eyes.
+The renderer is a small **deferred-style 2D lighting pipeline** with GLSL shaders:
+
+- **Procedural HD textures** — stone floors (cellular noise) and rough rock walls
+  (Perlin noise) generated at startup, plus 2.5D wall blocks with lit top edges
+  and dark front faces for real depth.
+- **Per-pixel dynamic lighting** — a light buffer is accumulated with one soft
+  light per *visible* tile (so walls actually occlude light), plus point lights
+  for items, stairs, the boss, combat sparks, and a flickering player torch.
+- **Composite shader** — `albedo × (ambient + light)` with a filmic tonemap,
+  saturation lift, and vignette; explored-but-unseen tiles fall back to a cool
+  ambient (the classic warm-light / cool-shadow look).
+- **Bloom** — the light buffer is downsampled and run through a separable
+  gaussian blur (shader) for glow.
+- Smooth fractional-scroll camera, tweened movement + idle-bob, a particle
+  system, floating damage numbers, mipmapped TrueType text, and shaded sprites
+  with outlines and eyes. The cyan hero is hue-separated from gold loot and warm
+  enemies for instant readability.
 
 The GUI build links **raylib statically** and embeds its font, so on Windows it's
 a single self-contained `.exe` (no DLLs, no asset files). raylib's prebuilt
