@@ -6,10 +6,13 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <filesystem>
 #include <format>
 #include <iterator>
 #include <optional>
 #include <ranges>
+#include <string>
+#include <system_error>
 
 #include "../core/Terminal.hpp"
 #include "../world/Fov.hpp"
@@ -47,7 +50,17 @@ int dir_to_key(Vec2 d) {
     return '.';
 }
 
-Entity make_monster(Vec2 pos, int depth, Rng& rng) {
+// Difficulty tunes how hard monsters hit and how much HP they bring.
+double monster_scale(Difficulty d) {
+    switch (d) {
+        case Difficulty::Easy:   return 0.75;
+        case Difficulty::Hard:   return 1.35;
+        case Difficulty::Normal: break;
+    }
+    return 1.0;
+}
+
+Entity make_monster(Vec2 pos, int depth, Rng& rng, Difficulty diff) {
     Entity e;
     e.pos = pos;
     e.faction = Faction::Monster;
@@ -71,21 +84,49 @@ Entity make_monster(Vec2 pos, int depth, Rng& rng) {
         e.combat = {28, 28, 8, 2}; e.xp_reward = 35;
     }
 
-    // Scale a touch with depth so deeper floors actually bite.
-    e.combat.max_hp += depth * 2;
+    // Scale with depth so deeper floors bite, then by difficulty.
+    const double s = monster_scale(diff);
+    e.combat.max_hp = static_cast<int>((e.combat.max_hp + depth * 2) * s);
+    e.combat.max_hp = std::max(1, e.combat.max_hp);
     e.combat.hp = e.combat.max_hp;
-    e.combat.attack += depth / 2;
+    e.combat.attack = std::max(1, static_cast<int>((e.combat.attack + depth / 2) * s));
+    return e;
+}
+
+// The CEO — a unique boss that guards the exit on the final floor.
+Entity make_boss(Vec2 pos, Difficulty diff) {
+    const double s = monster_scale(diff);
+    Entity e;
+    e.pos = pos;
+    e.faction = Faction::Monster;
+    e.kind = MonsterKind::Manager;
+    e.glyph = '&';
+    e.color = 95; // bright magenta
+    e.name = "the CEO";
+    e.combat.max_hp = std::max(1, static_cast<int>(120 * s));
+    e.combat.hp = e.combat.max_hp;
+    e.combat.attack = std::max(1, static_cast<int>(12 * s));
+    e.combat.defense = 3;
+    e.xp_reward = 200;
     return e;
 }
 
 } // namespace
 
-Game::Game(std::uint64_t seed) : rng_(seed) {
+Game::Game(Config config)
+    : config_(std::move(config)),
+      rng_(config_.seed),
+      high_scores_(config_.scores_path) {
+    if (config_.persist_scores) high_scores_.load();
+
+    const int start_hp = config_.difficulty == Difficulty::Easy   ? 40
+                         : config_.difficulty == Difficulty::Hard ? 24
+                                                                  : 30;
     player_.glyph = '@';
     player_.color = 93;
     player_.name = "You";
     player_.faction = Faction::Player;
-    player_.combat = {30, 30, 5, 1};
+    player_.combat = {start_hp, start_hp, 5, 1};
     new_floor(1);
     log("You start your side hustle on floor 1. Find the stairs (>).");
 }
@@ -110,15 +151,25 @@ void Game::new_floor(int depth) {
 }
 
 void Game::spawn_monsters(const std::vector<Room>& rooms) {
+    const int extra = config_.difficulty == Difficulty::Hard ? 1
+                     : config_.difficulty == Difficulty::Easy ? -1
+                                                              : 0;
+
     // Skip rooms[0]: that is where the player materialises.
     for (std::size_t i = 1; i < rooms.size(); ++i) {
         const Room& r = rooms[i];
-        const int count = std::min(rng_.range(0, 1 + depth_ / 2), 3);
+        const int count = std::clamp(rng_.range(0, 1 + depth_ / 2) + extra, 0, 3);
         for (int c = 0; c < count; ++c) {
             const Vec2 p{rng_.range(r.x, r.x + r.w - 1), rng_.range(r.y, r.y + r.h - 1)};
             if (!map_.walkable(p) || p == player_.pos || monster_at(p)) continue;
-            monsters_.push_back(make_monster(p, depth_, rng_));
+            monsters_.push_back(make_monster(p, depth_, rng_, config_.difficulty));
         }
+    }
+
+    // The CEO waits by the exit on the deepest floor.
+    if (depth_ >= kMaxDepth && monster_at(stairs_) == nullptr) {
+        monsters_.push_back(make_boss(stairs_, config_.difficulty));
+        log("\x1b[95mYou sense the CEO guarding the way out (&).\x1b[0m");
     }
 }
 
@@ -158,6 +209,9 @@ bool Game::handle_key(int key) {
         case '.':
         case ' ':
             return true; // wait a turn
+        case 'e':
+        case 'E':
+            return use_coffee();
         case '>':
             if (player_.pos == stairs_) {
                 descend();
@@ -192,17 +246,32 @@ void Game::pickup(Item& item) {
             cash_ += item.amount;
             log(std::format("You pocket ${} of side-hustle cash.", item.amount));
             break;
-        case ItemKind::Coffee: {
-            const int before = player_.combat.hp;
-            player_.combat.hp = std::min(player_.combat.max_hp, player_.combat.hp + item.amount);
-            log(std::format("Coffee! You recover {} HP.", player_.combat.hp - before));
+        case ItemKind::Coffee:
+            ++coffees_;
+            log("You stash a coffee. Press 'e' to drink one (heals).");
             break;
-        }
         case ItemKind::Upgrade:
             player_.combat.attack += item.amount;
             log("New laptop — your output (attack) permanently improves!");
             break;
     }
+}
+
+bool Game::use_coffee() {
+    if (coffees_ <= 0) {
+        log("You have no coffee left.");
+        return false;
+    }
+    if (player_.combat.hp >= player_.combat.max_hp) {
+        log("You're already at full energy.");
+        return false;
+    }
+    --coffees_;
+    constexpr int heal = 15;
+    const int before = player_.combat.hp;
+    player_.combat.hp = std::min(player_.combat.max_hp, player_.combat.hp + heal);
+    log(std::format("Coffee break! You recover {} HP.", player_.combat.hp - before));
+    return true; // drinking takes a turn
 }
 
 void Game::monsters_turn() {
@@ -305,6 +374,24 @@ void Game::log(std::string message) {
     while (log_.size() > 6) log_.pop_front();
 }
 
+int Game::score() const {
+    return HighScores::compute(depth_, level_, cash_, state_ == State::Won);
+}
+
+void Game::record_score() {
+    if (score_recorded_ || !config_.persist_scores) return;
+    score_recorded_ = true;
+    high_scores_.add(ScoreEntry{
+        .name = config_.player_name,
+        .depth = depth_,
+        .level = level_,
+        .cash = cash_,
+        .score = score(),
+        .won = state_ == State::Won,
+    });
+    high_scores_.save();
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -361,11 +448,46 @@ std::string Game::hud_str() const {
     std::string s = "\x1b[0m\r\n";
     s += std::format("\x1b[91mHP\x1b[0m [\x1b[92m{}\x1b[0m] {}/{}   ", bar, hp, mhp);
     s += std::format("\x1b[93mFloor\x1b[0m {}   \x1b[93mLvl\x1b[0m {} (xp {}/{})   "
-                     "\x1b[93m$\x1b[0m{}\r\n",
-                     depth_, level_, xp_, xp_next_, cash_);
+                     "\x1b[93m$\x1b[0m{}   \x1b[36mcoffee\x1b[0m x{}\r\n",
+                     depth_, level_, xp_, xp_next_, cash_, coffees_);
     s += "\r\n";
     for (const auto& m : log_) s += "  " + m + "\r\n";
-    s += "\r\n\x1b[90mmove wasd/hjkl/arrows  diagonals yubn  wait .  descend >  quit q\x1b[0m\r\n";
+    s += "\r\n\x1b[90mmove wasd/hjkl/arrows  diag yubn  coffee e  wait .  descend >  quit q\x1b[0m\r\n";
+    return s;
+}
+
+std::string Game::scoreboard_str() const {
+    std::string s = "\x1b[97m   Top side hustles\x1b[0m\r\n";
+    const auto& entries = high_scores_.entries();
+    if (entries.empty()) {
+        s += "\x1b[90m   (none yet — be the first)\x1b[0m\r\n";
+        return s;
+    }
+    int rank = 1;
+    for (const auto& e : entries) {
+        s += std::format("\x1b[90m{:>2}.\x1b[0m \x1b[93m{:>6}\x1b[0m  {:<10} "
+                         "\x1b[90mfloor {} lvl {} ${}{}\x1b[0m\r\n",
+                         rank++, e.score, e.name, e.depth, e.level, e.cash,
+                         e.won ? " WON" : "");
+    }
+    return s;
+}
+
+std::string Game::render_title() const {
+    std::string s = "\x1b[2J\x1b[H\x1b[0m\r\n";
+    s += "\x1b[93m   ____  _     _        _   _           _   _      \x1b[0m\r\n";
+    s += "\x1b[93m  / ___|(_) __| | ___  | | | |_   _ ___| |_| | ___ \x1b[0m\r\n";
+    s += "\x1b[93m  \\___ \\| |/ _` |/ _ \\ | |_| | | | / __| __| |/ _ \\\x1b[0m\r\n";
+    s += "\x1b[93m   ___) | | (_| |  __/ |  _  | |_| \\__ \\ |_| |  __/\x1b[0m\r\n";
+    s += "\x1b[93m  |____/|_|\\__,_|\\___| |_| |_|\\__,_|___/\\__|_|\\___|\x1b[0m\r\n";
+    s += "\r\n\x1b[90m   A corporate dungeon crawl in modern C++.\x1b[0m\r\n";
+    const char* diff = config_.difficulty == Difficulty::Easy   ? "Easy"
+                      : config_.difficulty == Difficulty::Hard  ? "Hard"
+                                                                : "Normal";
+    s += std::format("\x1b[90m   Difficulty: {}   Floors: {}\x1b[0m\r\n\r\n", diff, kMaxDepth);
+    s += scoreboard_str();
+    s += "\r\n\x1b[97m   Press any key to start";
+    s += "\x1b[90m  (q to quit)\x1b[0m\r\n";
     return s;
 }
 
@@ -397,6 +519,12 @@ std::string Game::render_end() const {
         s += "\x1b[92m   YOU WIN — you escaped and went full-time on your side hustle!\x1b[0m\r\n";
     }
     s += std::format("\r\n   Reached floor {}, level {}, with ${} banked.\r\n", depth_, level_, cash_);
+    s += std::format("\x1b[93m   Final score: {}\x1b[0m\r\n", score());
+    if (high_scores_.entries().size() == 1 ||
+        (!high_scores_.entries().empty() && high_scores_.entries().front().score == score())) {
+        s += "\x1b[92m   A new top score!\x1b[0m\r\n";
+    }
+    s += "\r\n" + scoreboard_str();
     s += "\r\n   Press any key to exit.\r\n";
     return s;
 }
@@ -442,8 +570,11 @@ std::string Game::ascii_snapshot() const {
 
 int Game::run() {
     Terminal term;
-    Terminal::present(render_frame());
 
+    Terminal::present(render_title());
+    if (term.read_key() == 'q') return 0;
+
+    Terminal::present(render_frame());
     while (state_ == State::Playing) {
         const int key = term.read_key();
         if (key == 'q' || key == 3 /* Ctrl-C */) break;
@@ -456,6 +587,7 @@ int Game::run() {
         Terminal::present(render_frame());
 
         if (state_ != State::Playing) {
+            record_score();
             Terminal::present(render_end());
             (void)term.read_key();
             break;
@@ -499,9 +631,35 @@ int Game::selftest() {
     }
 
     std::printf("\n%s\n", ascii_snapshot().c_str());
-    std::printf("[selftest] final state = %s\n",
-                state_ == State::Won ? "WON" : state_ == State::Dead ? "DEAD" : "PLAYING");
-    return state_ == State::Dead ? 0 : 0; // a death mid-test is still a valid run
+
+    // Exercise the persistent scoreboard end-to-end (save -> reload).
+    {
+        const auto tmp = std::filesystem::temp_directory_path() / "side-hustle-selftest-scores.txt";
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+
+        HighScores hs(tmp);
+        hs.load();
+        hs.add(ScoreEntry{.name = "alice", .depth = 3, .level = 4, .cash = 120,
+                          .score = HighScores::compute(3, 4, 120, false), .won = false});
+        hs.add(ScoreEntry{.name = "bob", .depth = 8, .level = 9, .cash = 300,
+                          .score = HighScores::compute(8, 9, 300, true), .won = true});
+        const bool saved = hs.save();
+
+        HighScores reloaded(tmp);
+        reloaded.load();
+        const bool ok = saved && reloaded.entries().size() == 2 &&
+                        reloaded.entries().front().name == "bob";
+        std::printf("[selftest] scores round-trip: %s (reloaded %zu entries, top=%s)\n",
+                    ok ? "OK" : "FAIL", reloaded.entries().size(),
+                    reloaded.entries().empty() ? "-" : reloaded.entries().front().name.c_str());
+        std::filesystem::remove(tmp, ec);
+    }
+
+    std::printf("[selftest] final state = %s, score = %d\n",
+                state_ == State::Won ? "WON" : state_ == State::Dead ? "DEAD" : "PLAYING",
+                score());
+    return 0;
 }
 
 } // namespace sh

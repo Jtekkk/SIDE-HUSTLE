@@ -3,6 +3,10 @@
 *.o
 *.obj
 side-hustle
+*.exe
+
+# Runtime data
+side-hustle-scores.txt
 
 # Editor / OS noise
 .vscode/
