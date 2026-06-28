@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "raylib.h"
+#include "rlgl.h"
 
 #include "AssetFont.h"
 #include "game/Game.hpp"
@@ -88,15 +89,47 @@ void main() {
 }
 )GLSL";
 
+const char* kPostFS = R"GLSL(
+#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;   // composed (lit + bloom + hero + fx)
+uniform vec2 res;
+uniform float time;
+out vec4 finalColor;
+void main() {
+    vec2 uv = fragTexCoord;
+    vec2 cc = uv - 0.5;
+    float d2 = dot(cc, cc);
+    // gentle barrel distortion (CRT curvature)
+    uv += cc * d2 * 0.028;
+    // chromatic aberration, stronger toward the edges
+    float ca = 0.0012 + 0.0042 * d2;
+    vec3 col;
+    col.r = texture(texture0, uv + cc * ca).r;
+    col.g = texture(texture0, uv).g;
+    col.b = texture(texture0, uv - cc * ca).b;
+    // scanlines + faint rolling flicker
+    float scan = 0.93 + 0.07 * sin(uv.y * res.y * 3.14159);
+    col *= scan * (0.985 + 0.015 * sin(time * 8.0));
+    // edge vignette + black beyond the curved frame
+    float vig = smoothstep(1.05, 0.30, length(cc));
+    col *= mix(0.55, 1.0, vig);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) col = vec3(0.0);
+    finalColor = vec4(col, 1.0);
+}
+)GLSL";
+
 // ===========================================================================
 // Globals (render resources)
 // ===========================================================================
 Font gFont{};
 Texture2D gFloorTex{}, gWallTex{}, gLightTex{};
-Shader gComposite{}, gBlur{};
+Shader gComposite{}, gBlur{}, gPost{};
 int gLocLightTex = 0, gLocAmbient = 0, gLocDir = 0;
+int gLocPostRes = 0, gLocPostTime = 0;
 
-RenderTexture2D gScene{}, gLight{}, gLit{}, gBloomA{}, gBloomB{};
+RenderTexture2D gScene{}, gLight{}, gLit{}, gBloomA{}, gBloomB{}, gComposed{};
 int gRtW = 0, gRtH = 0;
 constexpr int kBloomDiv = 3; // bloom buffers at 1/3 res
 
@@ -207,8 +240,11 @@ struct Anim {
     Vector2 playerR{};
     std::vector<Vector2> monR;
     std::vector<int> monHp;
+    std::vector<float> monPunch;       // white hit-flash per monster
     int prevHp = 0, prevCash = 0, prevLevel = 1, lastDepth = -1;
     float hpShown = 1.0f, xpShown = 0.0f, time = 0.0f;
+    float shake = 0.0f, playerPunch = 0.0f, playerLunge = 0.0f;
+    Vector2 playerLungeDir{};
 };
 Vector2 tile_center(float wx, float wy, float camx, float camy) {
     return {(wx + 0.5f - camx) * kTile, (wy + 0.5f - camy) * kTile};
@@ -222,12 +258,14 @@ void sync_fx(const Game& g, Anim& a, float dt, float camx, float camy) {
         a.lastDepth = g.depth();
         a.monR.assign(mons.size(), {});
         a.monHp.assign(mons.size(), 0);
+        a.monPunch.assign(mons.size(), 0.0f);
         for (std::size_t i = 0; i < mons.size(); ++i) {
             a.monR[i] = {(float)mons[i].pos.x, (float)mons[i].pos.y};
             a.monHp[i] = mons[i].combat.hp;
         }
         a.playerR = {(float)g.player().pos.x, (float)g.player().pos.y};
         a.prevHp = g.player().combat.hp; a.prevCash = g.cash(); a.prevLevel = g.level();
+        a.shake = a.playerPunch = a.playerLunge = 0.0f;
         gParticles.clear(); gFloats.clear();
     } else {
         for (std::size_t i = 0; i < mons.size(); ++i) {
@@ -236,14 +274,26 @@ void sync_fx(const Game& g, Anim& a, float dt, float camx, float camy) {
             if (m.combat.hp < a.monHp[i]) {
                 burst(sc, C(255, 170, 90), 8, 150.0f, 0.45f, 3.0f, false);
                 add_float({sc.x, sc.y - 10}, TextFormat("%d", a.monHp[i] - m.combat.hp), C(255, 236, 150), 28);
+                if (i < a.monPunch.size()) a.monPunch[i] = 1.0f;
                 if (m.combat.hp <= 0) burst(sc, code_color(m.color), 22, 230.0f, 0.7f, 3.5f, true);
+                // player attacked an adjacent foe -> lunge toward it
+                if (m.pos.chebyshev(g.player().pos) <= 1) {
+                    const float dx = (float)(m.pos.x - g.player().pos.x);
+                    const float dy = (float)(m.pos.y - g.player().pos.y);
+                    const float len = std::max(1.0f, std::sqrt(dx * dx + dy * dy));
+                    a.playerLungeDir = {dx / len, dy / len};
+                    a.playerLunge = 1.0f;
+                }
             }
             a.monHp[i] = m.combat.hp;
         }
         const Vector2 psc = tile_center(a.playerR.x, a.playerR.y, camx, camy);
         if (g.player().combat.hp < a.prevHp) {
+            const int dmg = a.prevHp - g.player().combat.hp;
             burst(psc, C(255, 90, 90), 12, 170.0f, 0.5f, 3.5f, false);
-            add_float({psc.x, psc.y - 12}, TextFormat("-%d", a.prevHp - g.player().combat.hp), C(255, 140, 140), 30);
+            add_float({psc.x, psc.y - 12}, TextFormat("-%d", dmg), C(255, 140, 140), 30);
+            a.playerPunch = 1.0f;
+            a.shake = std::min(12.0f, a.shake + 3.0f + dmg * 1.4f);
         }
         if (g.cash() > a.prevCash) {
             add_float({psc.x, psc.y - 6}, TextFormat("+$%d", g.cash() - a.prevCash), C(245, 210, 90), 22);
@@ -266,6 +316,12 @@ void sync_fx(const Game& g, Anim& a, float dt, float camx, float camy) {
     const float xpR = g.xp_next() > 0 ? (float)g.xp() / g.xp_next() : 0.0f;
     a.hpShown += (hpR - a.hpShown) * std::min(1.0f, dt * 6.0f);
     a.xpShown += (xpR - a.xpShown) * std::min(1.0f, dt * 6.0f);
+
+    a.shake = std::max(0.0f, a.shake - dt * 26.0f);
+    a.playerPunch = std::max(0.0f, a.playerPunch - dt * 5.0f);
+    a.playerLunge = std::max(0.0f, a.playerLunge - dt * 6.0f);
+    for (auto& mp : a.monPunch) mp = std::max(0.0f, mp - dt * 5.0f);
+
     update_particles(dt);
 }
 
@@ -326,7 +382,7 @@ void eyes(Vector2 c, float dx, float dy, float r) {
     DrawCircleV({c.x - dx, c.y - dy}, r * 0.5f, C(20, 20, 30));
     DrawCircleV({c.x + dx, c.y - dy}, r * 0.5f, C(20, 20, 30));
 }
-void draw_monster(const sh::Entity& m, Vector2 c, float bob) {
+void draw_monster(const sh::Entity& m, Vector2 c, float bob, float punch) {
     c.y += bob;
     const Color col = code_color(m.color), dark = shade(col, 0.5), lite = mix(col, WHITE, 0.35);
     shadow({c.x, c.y - bob});
@@ -335,7 +391,9 @@ void draw_monster(const sh::Entity& m, Vector2 c, float bob) {
         DrawPolyLines(c, 6, kTile * 0.42f, a_time_rot(), dark);
         DrawPoly(c, 6, kTile * 0.30f, a_time_rot(), shade(col, 0.7));
         DrawRectangle((int)c.x - 9, (int)(c.y - kTile * 0.46f), 18, 5, C(255, 215, 90));
-        eyes(c, 5, 2, 3); return;
+        eyes(c, 5, 2, 3);
+        if (punch > 0.0f) DrawCircleV(c, kTile * 0.44f, Fade(WHITE, 0.6f * punch));
+        return;
     }
     switch (m.kind) {
         case sh::MonsterKind::Bug: {
@@ -368,6 +426,7 @@ void draw_monster(const sh::Entity& m, Vector2 c, float bob) {
             eyes(c, 6, 3, 3); break;
         }
     }
+    if (punch > 0.0f) DrawCircleV(c, kTile * 0.34f, Fade(WHITE, 0.6f * punch));
 }
 void draw_item(const sh::Item& it, Vector2 c, float bob) {
     c.y += bob;
@@ -387,8 +446,9 @@ void draw_item(const sh::Item& it, Vector2 c, float bob) {
             DrawRectangleRounded({c.x - 9, c.y - 5, 18, 9}, 0.1f, 4, C(72, 132, 184)); break;
     }
 }
-void draw_player(Vector2 c, float bob) {
-    c.y += bob;
+void draw_player(Vector2 c, float bob, float punch, float lunge, Vector2 lunge_dir) {
+    c.x += lunge_dir.x * lunge * 11.0f;
+    c.y += lunge_dir.y * lunge * 11.0f + bob;
     shadow({c.x, c.y - bob});
     const float r = kTile * 0.35f;
     // Cool cyan hero: hue alone separates "me" from gold loot and warm enemies.
@@ -397,6 +457,7 @@ void draw_player(Vector2 c, float bob) {
     DrawCircleV({c.x, c.y + r * 0.05f}, r * 0.34f, C(28, 120, 132));
     eyes(c, 5, 2, 3);
     DrawCircleV({c.x - r * 0.34f, c.y - r * 0.40f}, r * 0.16f, Fade(WHITE, 0.9f));
+    if (punch > 0.0f) DrawCircleV(c, r * 1.05f, Fade(WHITE, 0.55f * punch));
 }
 
 // ---- light buffer ----------------------------------------------------------
@@ -559,14 +620,16 @@ void ensure_targets(int w, int h) {
     if (w == gRtW && h == gRtH) return;
     if (gRtW != 0) {
         UnloadRenderTexture(gScene); UnloadRenderTexture(gLight); UnloadRenderTexture(gLit);
-        UnloadRenderTexture(gBloomA); UnloadRenderTexture(gBloomB);
+        UnloadRenderTexture(gBloomA); UnloadRenderTexture(gBloomB); UnloadRenderTexture(gComposed);
     }
     gScene = LoadRenderTexture(w, h);
     gLight = LoadRenderTexture(w, h);
     gLit = LoadRenderTexture(w, h);
+    gComposed = LoadRenderTexture(w, h);
     gBloomA = LoadRenderTexture(w / kBloomDiv, h / kBloomDiv);
     gBloomB = LoadRenderTexture(w / kBloomDiv, h / kBloomDiv);
     SetTextureFilter(gLight.texture, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(gComposed.texture, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(gBloomA.texture, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(gBloomB.texture, TEXTURE_FILTER_BILINEAR);
     gRtW = w; gRtH = h;
@@ -587,9 +650,12 @@ int main() {
     make_textures();
     gComposite = LoadShaderFromMemory(nullptr, kCompositeFS);
     gBlur = LoadShaderFromMemory(nullptr, kBlurFS);
+    gPost = LoadShaderFromMemory(nullptr, kPostFS);
     gLocLightTex = GetShaderLocation(gComposite, "lightTex");
     gLocAmbient = GetShaderLocation(gComposite, "ambient");
     gLocDir = GetShaderLocation(gBlur, "dir");
+    gLocPostRes = GetShaderLocation(gPost, "res");
+    gLocPostTime = GetShaderLocation(gPost, "time");
 
     enum class Phase { Title, Playing, End };
     Phase phase = Phase::Title;
@@ -714,7 +780,8 @@ int main() {
                 const auto& m = mons[i];
                 if (!m.alive || !game->map().in_bounds(m.pos) || !game->map().at(m.pos).visible) continue;
                 const Vector2 c = tile_center(anim.monR[i].x, anim.monR[i].y, camx, camy);
-                draw_monster(m, c, std::sin(anim.time * 3.5f + i * 1.3f) * 1.6f);
+                draw_monster(m, c, std::sin(anim.time * 3.5f + i * 1.3f) * 1.6f,
+                             i < anim.monPunch.size() ? anim.monPunch[i] : 0.0f);
                 if (m.combat.hp < m.combat.max_hp) {
                     const float fr = std::clamp((float)m.combat.hp / std::max(1, m.combat.max_hp), 0.0f, 1.0f);
                     DrawRectangle((int)c.x - 14, (int)c.y - 22, 28, 4, C(35, 12, 12));
@@ -789,6 +856,17 @@ int main() {
             DrawTexture(gBloomB.texture, 0, 0, WHITE);
             EndShaderMode();
             EndTextureMode();
+
+            // ---- Pass 5: compose lit + bloom into one buffer for post-processing ----
+            // (inner blits use positive height; the single outer flip at present time
+            //  gives correct screen orientation.)
+            BeginTextureMode(gComposed);
+            ClearBackground(BLACK);
+            DrawTextureRec(gLit.texture, {0, 0, (float)mapAreaW, (float)H}, {0, 0}, WHITE);
+            BeginBlendMode(BLEND_ADDITIVE);
+            DrawTexturePro(gBloomA.texture, {0, 0, bw, bh}, {0, 0, (float)mapAreaW, (float)H}, {0, 0}, 0, Fade(WHITE, 0.45f));
+            EndBlendMode();
+            EndTextureMode();
         }
 
         // ===================================================================
@@ -825,18 +903,24 @@ int main() {
             draw_scoreboard(board, cx, H / 2 + 40);
             dtcsh("Press  ENTER  to start        Q to quit", cx, H - 64, 24, C(230, 235, 245));
         } else if (game) {
-            // lit scene
-            DrawTextureRec(gLit.texture, {0, 0, (float)mapAreaW, -(float)H}, {0, 0}, WHITE);
-            // bloom (additive)
-            BeginBlendMode(BLEND_ADDITIVE);
-            DrawTexturePro(gBloomA.texture, {0, 0, (float)gBloomA.texture.width, -(float)gBloomA.texture.height},
-                           {0, 0, (float)mapAreaW, (float)H}, {0, 0}, 0, Fade(WHITE, 0.45f));
-            EndBlendMode();
-            // hero + emissive FX on top of the lit scene
+            const float sx = (frand() * 2.0f - 1.0f) * anim.shake;
+            const float sy = (frand() * 2.0f - 1.0f) * anim.shake;
+            // CRT post-process pass over the lit+bloom dungeon
+            const float pres[2] = {(float)mapAreaW, (float)H};
+            BeginShaderMode(gPost);
+            SetShaderValue(gPost, gLocPostRes, pres, SHADER_UNIFORM_VEC2);
+            SetShaderValue(gPost, gLocPostTime, &anim.time, SHADER_UNIFORM_FLOAT);
+            DrawTextureRec(gComposed.texture, {0, 0, (float)mapAreaW, -(float)H}, {sx, sy}, WHITE);
+            EndShaderMode();
+            // hero + emissive FX drawn crisp on top, shifted with the shake
             BeginScissorMode(0, 0, mapAreaW, H);
-            draw_player(tile_center(anim.playerR.x, anim.playerR.y, camx, camy), std::sin(anim.time * 3.0f) * 1.4f);
+            rlPushMatrix();
+            rlTranslatef(sx, sy, 0);
+            draw_player(tile_center(anim.playerR.x, anim.playerR.y, camx, camy), std::sin(anim.time * 3.0f) * 1.4f,
+                        anim.playerPunch, anim.playerLunge, anim.playerLungeDir);
             draw_particles();
             draw_floats();
+            rlPopMatrix();
             EndScissorMode();
             if (flash > 0.0f) DrawRectangle(0, 0, mapAreaW, H, Fade(C(200, 30, 30), 0.35f * flash));
 
@@ -875,9 +959,9 @@ int main() {
 
     if (gRtW != 0) {
         UnloadRenderTexture(gScene); UnloadRenderTexture(gLight); UnloadRenderTexture(gLit);
-        UnloadRenderTexture(gBloomA); UnloadRenderTexture(gBloomB);
+        UnloadRenderTexture(gBloomA); UnloadRenderTexture(gBloomB); UnloadRenderTexture(gComposed);
     }
-    UnloadShader(gComposite); UnloadShader(gBlur);
+    UnloadShader(gComposite); UnloadShader(gBlur); UnloadShader(gPost);
     UnloadTexture(gFloorTex); UnloadTexture(gWallTex); UnloadTexture(gLightTex);
     UnloadFont(gFont);
     CloseWindow();
