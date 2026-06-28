@@ -112,23 +112,25 @@ Entity make_monster(Vec2 pos, int depth, Rng& rng, Difficulty diff) {
     return e;
 }
 
-// The CEO — a unique boss that guards the exit on the final floor.
-Entity make_boss(Vec2 pos, Difficulty diff) {
+// A named act boss (or the CEO) guarding a floor's exit. Stats come from the
+// story canon and are scaled by difficulty; every boss shares the '&' glyph so
+// the telegraphed boss moveset (summon / shockwave) keys off it.
+Entity make_boss(Vec2 pos, Difficulty diff, const story::BossSpec& spec) {
     const double s = monster_scale(diff);
     Entity e;
     e.pos = pos;
     e.faction = Faction::Monster;
     e.kind = MonsterKind::Manager;
     e.glyph = '&';
-    e.color = 95; // bright magenta
-    e.name = "the CEO";
-    e.combat.max_hp = std::max(1, static_cast<int>(120 * s));
+    e.color = spec.color;
+    e.name = spec.name;
+    e.combat.max_hp = std::max(1, static_cast<int>(spec.hp * s));
     e.combat.hp = e.combat.max_hp;
-    e.combat.attack = std::max(1, static_cast<int>(12 * s));
-    e.combat.defense = 3;
-    e.xp_reward = 200;
-    e.weight = 5;
-    e.force = 4;
+    e.combat.attack = std::max(1, static_cast<int>(spec.attack * s));
+    e.combat.defense = spec.defense;
+    e.xp_reward = spec.xp;
+    e.weight = spec.weight;
+    e.force = spec.force;
     return e;
 }
 
@@ -143,6 +145,9 @@ ansi::Rgb code_to_rgb(int code) {
         case 94: return {150, 140, 255};  // phisher
         case 36: return {90, 205, 215};   // coffee
         case 91: return {255, 95, 95};    // manager
+        case 92: return {130, 215, 140};  // boss: the Scrum Lord
+        case 96: return {240, 160, 70};   // boss: the Regional VP
+        case 90: return {130, 165, 245};  // boss: the Board Chair
         case 95: return {240, 120, 240};  // CEO
         case 97: return {245, 245, 245};  // upgrade / stairs
         default: return {220, 220, 220};
@@ -188,8 +193,7 @@ Game::Game(Config config)
     player_.weight = 1;
     player_.force = 2;
     new_floor(1);
-    log("You start your side hustle on floor 1. Find the stairs (>).");
-    log("Tip: your hits knock foes back - into walls, spikes, pits and barrels.");
+    log("Find the stairs (>). Tip: hits knock foes back - into walls, pits and barrels.");
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +214,11 @@ void Game::new_floor(int depth) {
     pending_spawns_.clear();
     for (const Vec2 b : dungeon.barrels) props_.push_back(Prop{b, PropKind::Barrel, true});
     for (const Vec2 cr : dungeon.crates) props_.push_back(Prop{cr, PropKind::Crate, true});
+    // Announce the floor and play its story beats before the boss taunt (which
+    // spawn_monsters logs), so the log reads in narrative order.
+    log(std::format("Floor {}/{} - {}", depth_, kMaxDepth, story::act_for(depth_).name));
+    for (const auto& line : story::beats(depth_)) log(line);
+
     spawn_monsters(dungeon.rooms);
     spawn_items(dungeon.rooms);
 
@@ -248,10 +257,11 @@ void Game::spawn_monsters(const std::vector<Room>& rooms) {
         }
     }
 
-    // The CEO waits by the exit on the deepest floor.
-    if (depth_ >= kMaxDepth && monster_at(stairs_) == nullptr) {
-        monsters_.push_back(make_boss(stairs_, config_.difficulty));
-        log("You sense the CEO guarding the way out (&).");
+    // An act boss (or the CEO) guards the exit on certain floors.
+    const story::BossSpec boss = story::boss_for(depth_);
+    if (boss.exists && monster_at(stairs_) == nullptr) {
+        monsters_.push_back(make_boss(stairs_, config_.difficulty, boss));
+        log(boss.taunt);
     }
 }
 
@@ -833,11 +843,10 @@ void Game::player_gain_xp(int xp) {
 void Game::descend() {
     if (depth_ >= kMaxDepth) {
         state_ = State::Won;
-        log("You climb the final stairs and walk out a free founder!");
+        log(story::ending());
         return;
     }
     new_floor(depth_ + 1);
-    log(std::format("You descend to floor {}.", depth_));
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,7 +1056,8 @@ std::string Game::hud_str() const {
 
     // Stats line.
     s += " ";
-    s += ansi::fg(label) + "Floor " + ansi::fg(value) + std::format("{}", depth_) + "  ";
+    s += ansi::fg(label) + "Floor " + ansi::fg(value) + std::format("{}/{}", depth_, kMaxDepth)
+       + ansi::fg(dim) + std::format(" {}", story::act_for(depth_).name) + "  ";
     s += ansi::fg(label) + "Lvl " + ansi::fg(value) + std::format("{}", level_)
        + ansi::fg(dim) + std::format(" ({}/{} xp)", xp_, xp_next_) + "  ";
     s += ansi::fg(yellow) + std::format("${}", cash_) + "  ";
@@ -1116,6 +1126,9 @@ std::string Game::render_title() const {
     }
     s += "\r\n  " + ansi::fg(Rgb{150, 160, 185}) +
          "A corporate dungeon crawl in modern C++." + ansi::reset + "\r\n";
+    s += "  " + ansi::fg(Rgb{120, 130, 155}) +
+         "Descend 12 floors of corporate hell, past four act bosses, to the CEO." +
+         ansi::reset + "\r\n";
     const char* diff = config_.difficulty == Difficulty::Easy   ? "Easy"
                       : config_.difficulty == Difficulty::Hard  ? "Hard"
                                                                 : "Normal";

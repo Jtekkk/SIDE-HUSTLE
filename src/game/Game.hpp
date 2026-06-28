@@ -14,6 +14,7 @@
 #include "../world/Map.hpp"
 #include "Components.hpp"
 #include "Scores.hpp"
+#include "Story.hpp"
 
 namespace sh {
 
@@ -62,6 +63,9 @@ public:
     [[nodiscard]] const std::vector<Projectile>& projectiles() const { return projectiles_; }
     [[nodiscard]] Vec2 stairs() const { return stairs_; }
     [[nodiscard]] int depth() const { return depth_; }
+    [[nodiscard]] int max_depth() const { return kMaxDepth; }
+    [[nodiscard]] const char* zone_name() const { return story::act_for(depth_).name; }
+    [[nodiscard]] int act() const { return story::act_for(depth_).number; }
     [[nodiscard]] int level() const { return level_; }
     [[nodiscard]] int xp() const { return xp_; }
     [[nodiscard]] int xp_next() const { return xp_next_; }
@@ -163,7 +167,7 @@ private:
     static constexpr int kMapH = 46;
     static constexpr int kViewW = 64;
     static constexpr int kViewH = 26;
-    static constexpr int kMaxDepth = 8;
+    static constexpr int kMaxDepth = story::kFloors;
 };
 
 } // namespace sh

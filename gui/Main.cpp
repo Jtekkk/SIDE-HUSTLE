@@ -218,6 +218,9 @@ Color code_color(int code) {
         case 94: return C(150, 140, 255);
         case 36: return C(98, 208, 218);
         case 91: return C(255, 100, 100);
+        case 92: return C(130, 215, 140);
+        case 96: return C(240, 160, 70);
+        case 90: return C(130, 165, 245);
         case 93: return C(255, 226, 122);
         case 95: return C(242, 122, 242);
         case 97: return C(245, 245, 245);
@@ -687,7 +690,8 @@ void draw_hud(const Game& g, const Anim& a, int x, int w, int h) {
         dt(label, ix, y, 19, C(170, 178, 198));
         dt(val, ix + 132, y, 19, vc); y += 28;
     };
-    stat("Floor", TextFormat("%d / 8", g.depth()), C(232, 236, 246));
+    stat("Floor", TextFormat("%d / %d", g.depth(), g.max_depth()), C(232, 236, 246));
+    dt(g.zone_name(), ix + 132, y - 6, 14, C(154, 162, 190)); y += 18; // zone caption
     stat("Cash", TextFormat("$%d", g.cash()), C(238, 205, 84));
     stat("Coffee", TextFormat("x%d  (E)", g.coffees()), C(98, 208, 218));
     stat("Attack", TextFormat("%d", p.combat.attack), C(232, 236, 246));
@@ -1263,6 +1267,7 @@ int main() {
             dtcsh("SIDE HUSTLE", cx, ty, 92, C(255, 224, 130));
             DrawRectangle((int)(cx - titleW / 2), (int)(ty + 96), (int)titleW, 3, C(255, 196, 90));
             dtc("A corporate dungeon crawl - modern C++ + raylib shaders", cx, H / 2 - 112, 22, C(150, 160, 185));
+            dtc("Descend 12 floors of corporate hell, past four act bosses, to the CEO.", cx, H / 2 - 86, 17, C(126, 136, 162));
             const int by = H / 2 - 64;
             int bx = cx - 252;
             for (int i = 0; i < 3; ++i) {

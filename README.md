@@ -2,8 +2,9 @@
 
 A roguelike written in **modern C++ (C++23)**. You're a freelancer descending a
 procedurally generated *corporate dungeon* — fight Bugs, Needy Clients,
-Recruiters and Middle Managers, grab cash and coffee, level up, and escape
-through eight floors (past the CEO) to go full-time on your side hustle.
+Recruiters and Middle Managers, grab cash and coffee, level up, and claw down
+**twelve floors across four themed acts**, past an **act boss** at the foot of
+each, to confront the CEO and go full-time on your side hustle.
 
 It ships in **two front-ends over one shared engine**:
 
@@ -25,6 +26,27 @@ The terminal version, for comparison:
   ###....................@M......
 HP [##########----------] 18/30   Floor 2   Lvl 2 (xp 4/30)   $44
 ```
+
+## The descent — story & acts
+
+The run is a twelve-floor descent down the corporate ladder, split into four
+**acts** (three floors each). Each act has its own zone name, its own narrative
+beats that play in the message log as you arrive, and an **act boss** guarding
+the stairs — you can't leave a floor until its guardian falls. Every boss shares
+the telegraphed `&` moveset (periodic summons + a wind-up radial shockwave),
+scaled up act by act:
+
+| Act | Zone | Floors | Act boss |
+|:---:|------|:------:|----------|
+| I | The Open Floor | 1–3 | **the Scrum Lord** — *"This wasn't in the sprint."* |
+| II | Middle Management | 4–6 | **the Regional VP** — wants to "circle back", with your skull |
+| III | The Executive Suite | 7–9 | **the Board Chair** — demands a "quick sync" (no agenda) |
+| IV | The C-Suite | 10–12 | **the CEO** — *"Let's talk equity."* |
+
+The story canon (act for a floor, which boss guards it, the beats that play, the
+ending) all lives in one header, [`src/game/Story.hpp`](src/game/Story.hpp), so
+the engine and both front-ends read the same script. Beat that final fight and
+you walk out a free founder.
 
 ## Build & play
 
@@ -121,8 +143,9 @@ double-click it or run it from `cmd` / PowerShell. Use a modern terminal
 
 Movement is turn-based: every step you take, the monsters take one too. Walk
 into a monster to attack it. Find the `>` stairs on each floor to go deeper —
-and on the **final floor the CEO (`&`) guards the exit**, so you'll have to get
-past it to win.
+but every third floor an **act boss (`&`) guards the stairs**, and on the
+**final floor the CEO (`&`) blocks the exit**, so you'll have to put each of
+them down to win (see [The descent](#the-descent--story--acts)).
 
 ### Command-line flags
 
@@ -173,7 +196,7 @@ positioning is the game:
 | `r` | Recruiter | Tough, heavier |
 | `p` | Phisher | Ranged — kites and fires projectiles down straight lines |
 | `M` | Middle Manager | Heavy: resists knockback, shoves you hard |
-| `&` | The CEO | Final-floor boss, guards the exit |
+| `&` | Act boss / CEO | Guards the stairs every third floor; summons minions and telegraphs a radial shockwave. Four of them, one per act, ending with the CEO |
 | `$` | Cash | Score |
 | `!` | Coffee | Stashed in your bag; drink with `e` to heal |
 | `/` | Better laptop | Permanent attack upgrade |
@@ -200,6 +223,7 @@ src/
 │   └── Pathfinding.*   A* with a custom-hashed Vec2 and std::priority_queue
 ├── game/
 │   ├── Components.hpp  data-oriented Entity / Item structs
+│   ├── Story.hpp       acts, act bosses, per-floor narrative beats (canon)
 │   ├── Scores.*        persistent leaderboard (std::filesystem + fstream)
 │   └── Game.*          turn loop, combat, progression, rendering, menus
 └── main.cpp            arg parsing; interactive vs. --selftest
