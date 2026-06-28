@@ -23,6 +23,7 @@ struct DungeonResult {
     std::vector<Room> rooms;
     Vec2 player_start{};
     Vec2 stairs{};
+    std::vector<Vec2> barrels;  // explosive-barrel spawn positions
 };
 
 // Builds a fully connected dungeon of the requested size. `depth` is the floor

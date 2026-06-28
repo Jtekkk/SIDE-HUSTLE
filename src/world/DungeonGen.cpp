@@ -123,11 +123,81 @@ void connect(const BspNode* n, Map& map, Rng& rng) {
     if (a && b) carve_corridor(map, a->center(), b->center(), rng);
 }
 
+// 8-directional flood fill over walkable tiles (pits/walls block).
+bool reachable(const Map& m, Vec2 from, Vec2 to) {
+    if (!m.walkable(from) || !m.walkable(to)) return false;
+    std::vector<char> seen(static_cast<std::size_t>(m.width()) * m.height(), 0);
+    auto idx = [&](Vec2 p) { return static_cast<std::size_t>(p.y) * m.width() + p.x; };
+    std::vector<Vec2> q{from};
+    seen[idx(from)] = 1;
+    constexpr Vec2 dirs[8] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+    for (std::size_t qi = 0; qi < q.size(); ++qi) {
+        const Vec2 c = q[qi];
+        if (c == to) return true;
+        for (const Vec2 d : dirs) {
+            const Vec2 nb = c + d;
+            if (m.walkable(nb) && !seen[idx(nb)]) { seen[idx(nb)] = 1; q.push_back(nb); }
+        }
+    }
+    return false;
+}
+
+// Scatter pits, spikes and explosive barrels through the (non-entrance) rooms,
+// then guarantee the stairs are still reachable (reverting pits if not).
+void place_hazards(DungeonResult& res, Rng& rng, int depth) {
+    Map& m = res.map;
+    auto is_floor = [&](Vec2 p) { return m.in_bounds(p) && m.at(p).type == TileType::Floor; };
+
+    for (std::size_t ri = 1; ri < res.rooms.size(); ++ri) {
+        const Room& r = res.rooms[ri];
+        if (r.w < 5 || r.h < 5) continue;
+        const Vec2 ctr = r.center();
+        // Interior, away from the room centre (corridors connect centres).
+        auto interior = [&](Vec2 p) {
+            return p.x > r.x && p.x < r.x + r.w - 1 && p.y > r.y && p.y < r.y + r.h - 1 &&
+                   p.chebyshev(ctr) >= 2 && is_floor(p);
+        };
+        auto pick = [&]() -> Vec2 {
+            for (int t = 0; t < 14; ++t) {
+                const Vec2 p{rng.range(r.x + 1, r.x + r.w - 2), rng.range(r.y + 1, r.y + r.h - 2)};
+                if (interior(p)) return p;
+            }
+            return Vec2{-1, -1};
+        };
+        auto blob = [&](TileType type) {
+            const Vec2 p = pick();
+            if (!m.in_bounds(p)) return;
+            m.at(p).type = type;
+            if (rng.chance(0.5)) {
+                const Vec2 q = p + Vec2{rng.range(-1, 1), rng.range(-1, 1)};
+                if (interior(q)) m.at(q).type = type;
+            }
+        };
+
+        if (rng.chance(0.30 + depth * 0.02)) blob(TileType::Pit);
+        if (rng.chance(0.28)) blob(TileType::Spikes);
+        const int barrels = std::min(rng.range(0, 1 + depth / 3), 2);
+        for (int b = 0; b < barrels; ++b) {
+            const Vec2 p = pick();
+            if (m.in_bounds(p) &&
+                std::find(res.barrels.begin(), res.barrels.end(), p) == res.barrels.end()) {
+                res.barrels.push_back(p);
+            }
+        }
+    }
+
+    if (!reachable(m, res.player_start, res.stairs)) {
+        for (int y = 0; y < m.height(); ++y)
+            for (int x = 0; x < m.width(); ++x) {
+                const Vec2 p{x, y};
+                if (m.at(p).type == TileType::Pit) m.at(p).type = TileType::Floor;
+            }
+    }
+}
+
 } // namespace
 
 DungeonResult generate_dungeon(int w, int h, Rng& rng, int depth) {
-    (void)depth;
-
     DungeonResult result;
     result.map = Map(w, h); // all walls
 
@@ -155,6 +225,8 @@ DungeonResult generate_dungeon(int w, int h, Rng& rng, int depth) {
     }
     result.stairs = farthest->center();
     result.map.at(result.stairs).type = TileType::StairsDown;
+
+    place_hazards(result, rng, depth);
 
     return result;
 }

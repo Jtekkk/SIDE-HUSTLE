@@ -51,6 +51,7 @@ public:
     [[nodiscard]] const Entity& player() const { return player_; }
     [[nodiscard]] const std::vector<Entity>& monsters() const { return monsters_; }
     [[nodiscard]] const std::vector<Item>& items() const { return items_; }
+    [[nodiscard]] const std::vector<Prop>& props() const { return props_; }
     [[nodiscard]] Vec2 stairs() const { return stairs_; }
     [[nodiscard]] int depth() const { return depth_; }
     [[nodiscard]] int level() const { return level_; }
@@ -82,6 +83,14 @@ private:
     bool use_coffee();                    // consume a carried coffee to heal
     void monsters_turn();
     void attack(Entity& attacker, Entity& defender);
+    // --- physics / interactions ---------------------------------------------
+    void damage(Entity& e, int amount, std::string cause = "");
+    void on_death(Entity& e);
+    void apply_knockback(Entity& target, Vec2 dir, int power);
+    void explode_barrel(Prop& barrel);
+    void enter_tile(Entity& e);           // spike damage / pit death on entry
+    Entity* entity_at(Vec2 p, const Entity* exclude = nullptr);
+    Prop* prop_at(Vec2 p);
     void player_gain_xp(int xp);
     void descend();
     void record_score();
@@ -108,6 +117,7 @@ private:
     Entity player_;
     std::vector<Entity> monsters_;
     std::vector<Item> items_;
+    std::vector<Prop> props_;
     Vec2 stairs_{};
 
     int depth_{1};

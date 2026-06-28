@@ -30,6 +30,18 @@ struct Entity {
     Combat combat{};
     MonsterKind kind{MonsterKind::Bug};
     int xp_reward{0};
+    int weight{1};        // knockback resistance
+    int force{1};         // knockback power dealt on a hit
+    bool alive{true};
+};
+
+// A physical object in the world (currently: an explosive barrel). Blocks
+// movement, can be pushed, and detonates when something slams into it.
+enum class PropKind : unsigned char { Barrel };
+
+struct Prop {
+    Vec2 pos{};
+    PropKind kind{PropKind::Barrel};
     bool alive{true};
 };
 

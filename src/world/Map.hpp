@@ -15,6 +15,8 @@ enum class TileType : unsigned char {
     Wall,
     Floor,
     StairsDown,
+    Pit,     // a chasm: blocks walking, but things can be knocked in (and fall)
+    Spikes,  // walkable, but hurts whatever enters or is shoved onto it
 };
 
 struct Tile {
@@ -42,9 +44,19 @@ public:
     [[nodiscard]] bool is_wall(Vec2 p) const {
         return !in_bounds(p) || tiles_.at(p).type == TileType::Wall;
     }
+    [[nodiscard]] bool is_pit(Vec2 p) const {
+        return in_bounds(p) && tiles_.at(p).type == TileType::Pit;
+    }
+    [[nodiscard]] bool is_spikes(Vec2 p) const {
+        return in_bounds(p) && tiles_.at(p).type == TileType::Spikes;
+    }
+    // Sight passes over pits and spikes; only walls block it.
     [[nodiscard]] bool blocks_sight(Vec2 p) const { return is_wall(p); }
+    // Walkable under one's own power: not a wall and not an open pit.
     [[nodiscard]] bool walkable(Vec2 p) const {
-        return in_bounds(p) && tiles_.at(p).type != TileType::Wall;
+        if (!in_bounds(p)) return false;
+        const TileType t = tiles_.at(p).type;
+        return t != TileType::Wall && t != TileType::Pit;
     }
 
 private:

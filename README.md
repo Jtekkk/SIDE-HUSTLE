@@ -135,19 +135,39 @@ Runs are scored on depth, level and cash (with a bonus for escaping) and saved
 to a local `side-hustle-scores.txt` leaderboard shown on the title and
 game-over screens.
 
+### Physics & interactions
+
+Combat isn't just "bump until someone dies" — every hit is a **knockback**, and
+positioning is the game:
+
+- A hit shoves the target along the strike direction; distance = attacker
+  **force** − target **weight**. Light foes (Bugs) fly; heavy ones (Managers)
+  barely move — and Managers shove *you*.
+- Momentum resolves into the world: slammed into a **wall** = impact damage;
+  into **another enemy** = both hurt and the second is knocked too (chains);
+  onto **spikes** = bleed; into a **pit** = instant death; into an **explosive
+  barrel** = detonation.
+- **Barrels** (`0`) are pushable (Sokoban-style) and chain-explode in a radius —
+  set up combos by knocking a foe into one beside a pack.
+- **Pits** (`O`) and barrels are obstacles enemies path *around*, so terrain
+  becomes a weapon you exploit with forced movement.
+
 ### What you'll meet
 
 | Glyph | Thing | Notes |
 |:-----:|-------|-------|
 | `@` | You | Don't let your HP hit zero |
-| `b` | Bug | Weak, plentiful |
+| `b` | Bug | Weak, light — flies far when hit |
 | `c` | Needy Client | Hits harder |
-| `r` | Recruiter | Tough |
-| `M` | Middle Manager | The real boss fight |
+| `r` | Recruiter | Tough, heavier |
+| `M` | Middle Manager | Heavy: resists knockback, shoves you hard |
 | `&` | The CEO | Final-floor boss, guards the exit |
 | `$` | Cash | Score |
 | `!` | Coffee | Stashed in your bag; drink with `e` to heal |
 | `/` | Better laptop | Permanent attack upgrade |
+| `O` | Pit | Knock enemies in for an instant kill (and don't get shoved in) |
+| `^` | Spikes | Hurts whatever steps or is shoved onto it |
+| `0` | Barrel | Push it; detonates when something slams into it |
 
 ## Architecture & the "advanced C++"
 

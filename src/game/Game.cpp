@@ -85,6 +85,14 @@ Entity make_monster(Vec2 pos, int depth, Rng& rng, Difficulty diff) {
         e.combat = {28, 28, 8, 2}; e.xp_reward = 35;
     }
 
+    // Physics: heavier foes resist knockback and shove harder.
+    switch (e.kind) {
+        case MonsterKind::Bug:       e.weight = 0; e.force = 1; break;
+        case MonsterKind::Client:    e.weight = 1; e.force = 2; break;
+        case MonsterKind::Recruiter: e.weight = 2; e.force = 2; break;
+        case MonsterKind::Manager:   e.weight = 3; e.force = 3; break;
+    }
+
     // Scale with depth so deeper floors bite, then by difficulty.
     const double s = monster_scale(diff);
     e.combat.max_hp = static_cast<int>((e.combat.max_hp + depth * 2) * s);
@@ -109,6 +117,8 @@ Entity make_boss(Vec2 pos, Difficulty diff) {
     e.combat.attack = std::max(1, static_cast<int>(12 * s));
     e.combat.defense = 3;
     e.xp_reward = 200;
+    e.weight = 5;
+    e.force = 4;
     return e;
 }
 
@@ -164,8 +174,11 @@ Game::Game(Config config)
     player_.name = "You";
     player_.faction = Faction::Player;
     player_.combat = {start_hp, start_hp, 5, 1};
+    player_.weight = 1;
+    player_.force = 2;
     new_floor(1);
     log("You start your side hustle on floor 1. Find the stairs (>).");
+    log("Tip: your hits knock foes back — into walls, spikes, pits and barrels.");
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +194,8 @@ void Game::new_floor(int depth) {
 
     monsters_.clear();
     items_.clear();
+    props_.clear();
+    for (const Vec2 b : dungeon.barrels) props_.push_back(Prop{b, PropKind::Barrel, true});
     spawn_monsters(dungeon.rooms);
     spawn_items(dungeon.rooms);
 
@@ -198,7 +213,7 @@ void Game::spawn_monsters(const std::vector<Room>& rooms) {
         const int count = std::clamp(rng_.range(0, 1 + depth_ / 2) + extra, 0, 3);
         for (int c = 0; c < count; ++c) {
             const Vec2 p{rng_.range(r.x, r.x + r.w - 1), rng_.range(r.y, r.y + r.h - 1)};
-            if (!map_.walkable(p) || p == player_.pos || monster_at(p)) continue;
+            if (!map_.walkable(p) || p == player_.pos || monster_at(p) || prop_at(p)) continue;
             monsters_.push_back(make_monster(p, depth_, rng_, config_.difficulty));
         }
     }
@@ -216,7 +231,7 @@ void Game::spawn_items(const std::vector<Room>& rooms) {
         if (!rng_.chance(0.7)) continue;
 
         const Vec2 p{rng_.range(r.x, r.x + r.w - 1), rng_.range(r.y, r.y + r.h - 1)};
-        if (!map_.walkable(p) || p == player_.pos) continue;
+        if (!map_.walkable(p) || map_.is_spikes(p) || p == player_.pos || prop_at(p)) continue;
 
         Item it;
         it.pos = p;
@@ -268,9 +283,27 @@ bool Game::try_move_player(Vec2 dir) {
         attack(player_, *target);
         return true;
     }
+    // Shove a barrel if there's clear floor behind it (Sokoban-style).
+    if (Prop* barrel = prop_at(dest)) {
+        const Vec2 behind = dest + dir;
+        if (map_.walkable(behind) && !monster_at(behind) && !prop_at(behind) && behind != player_.pos) {
+            barrel->pos = behind;
+            player_.pos = dest;
+            log("You shove a barrel.");
+            enter_tile(player_);
+            if (player_.alive && state_ == State::Playing) {
+                if (Item* it = item_at(dest)) pickup(*it);
+            }
+            return true;
+        }
+        return false; // wedged — can't push
+    }
     if (map_.walkable(dest)) {
         player_.pos = dest;
-        if (Item* it = item_at(dest)) pickup(*it);
+        enter_tile(player_);
+        if (player_.alive && state_ == State::Playing) {
+            if (Item* it = item_at(dest)) pickup(*it);
+        }
         return true;
     }
     return false; // walked into a wall — no turn consumed
@@ -313,10 +346,9 @@ bool Game::use_coffee() {
 
 void Game::monsters_turn() {
     std::vector<Vec2> occupied;
-    occupied.reserve(monsters_.size());
-    for (const auto& m : monsters_) {
-        if (m.alive) occupied.push_back(m.pos);
-    }
+    occupied.reserve(monsters_.size() + props_.size());
+    for (const auto& m : monsters_) if (m.alive) occupied.push_back(m.pos);
+    for (const auto& pr : props_) if (pr.alive) occupied.push_back(pr.pos); // route around barrels
 
     for (auto& m : monsters_) {
         if (!m.alive || state_ != State::Playing) continue;
@@ -332,7 +364,10 @@ void Game::monsters_turn() {
         const bool aware = map_.in_bounds(m.pos) && map_.at(m.pos).visible && dist <= 12;
         if (aware) {
             if (const auto step = next_step_towards(map_, m.pos, player_.pos, occupied)) {
-                if (*step != player_.pos && !monster_at(*step)) m.pos = *step;
+                if (*step != player_.pos && !monster_at(*step) && !prop_at(*step)) {
+                    m.pos = *step;
+                    enter_tile(m);
+                }
             }
         } else if (rng_.chance(0.3)) {
             constexpr std::array<Vec2, 8> dirs = {
@@ -341,27 +376,133 @@ void Game::monsters_turn() {
             };
             const Vec2 d = rng_.pick(dirs.begin(), dirs.end());
             const Vec2 dest = m.pos + d;
-            if (map_.walkable(dest) && dest != player_.pos && !monster_at(dest)) m.pos = dest;
+            if (map_.walkable(dest) && dest != player_.pos && !monster_at(dest) && !prop_at(dest)) {
+                m.pos = dest;
+                enter_tile(m);
+            }
         }
     }
 }
 
+namespace {
+Vec2 unit_dir(Vec2 d) { return {(d.x > 0) - (d.x < 0), (d.y > 0) - (d.y < 0)}; }
+}
+
 void Game::attack(Entity& attacker, Entity& defender) {
     const int dmg = std::max(1, attacker.combat.attack - defender.combat.defense + rng_.range(-1, 1));
-    defender.combat.hp -= dmg;
     const char* verb = (&attacker == &player_) ? "hit" : "hits";
     log(std::format("{} {} {} for {} damage.", attacker.name, verb, defender.name, dmg));
+    damage(defender, dmg);
 
-    if (defender.combat.hp > 0) return;
+    // Knock the survivor back along the line of the blow.
+    if (defender.alive && (&defender != &player_ || state_ == State::Playing)) {
+        apply_knockback(defender, unit_dir(defender.pos - attacker.pos),
+                        attacker.force - defender.weight);
+    }
+}
 
-    defender.alive = false;
-    if (&defender == &player_) {
-        state_ = State::Dead;
-        log("You have been laid off. Game over.");
-    } else {
-        log(std::format("{} is defeated!", defender.name));
-        cash_ += defender.xp_reward / 2;
-        player_gain_xp(defender.xp_reward);
+void Game::damage(Entity& e, int amount, std::string cause) {
+    if (&e != &player_ && !e.alive) return;
+    e.combat.hp -= std::max(0, amount);
+    if (!cause.empty()) log(std::move(cause));
+    if (e.combat.hp <= 0) on_death(e);
+}
+
+void Game::on_death(Entity& e) {
+    if (&e == &player_) {
+        if (state_ == State::Playing) {
+            state_ = State::Dead;
+            log("You have been laid off. Game over.");
+        }
+        return;
+    }
+    if (!e.alive) return;
+    e.alive = false;
+    log(std::format("{} is defeated!", e.name));
+    cash_ += e.xp_reward / 2;
+    player_gain_xp(e.xp_reward);
+}
+
+Entity* Game::entity_at(Vec2 p, const Entity* exclude) {
+    if (&player_ != exclude && player_.pos == p && state_ == State::Playing) return &player_;
+    for (auto& m : monsters_) {
+        if (&m != exclude && m.alive && m.pos == p) return &m;
+    }
+    return nullptr;
+}
+
+Prop* Game::prop_at(Vec2 p) {
+    for (auto& pr : props_) {
+        if (pr.alive && pr.pos == p) return &pr;
+    }
+    return nullptr;
+}
+
+// Slide `target` up to `power` tiles, resolving whatever it meets: a wall (slam),
+// another body (collide + chain-knock), a pit (fall to death), spikes (bleed and
+// keep going) or an explosive barrel (detonate).
+void Game::apply_knockback(Entity& target, Vec2 dir, int power) {
+    if ((dir.x == 0 && dir.y == 0) || power <= 0) return;
+    int remaining = std::min(power, 4);
+    while (remaining > 0 && target.alive && (&target != &player_ || state_ == State::Playing)) {
+        const Vec2 next = target.pos + dir;
+        if (!map_.in_bounds(next) || map_.is_wall(next)) {
+            damage(target, remaining * 3, std::format("{} slams into the wall.", target.name));
+            return;
+        }
+        if (Prop* barrel = prop_at(next)) {
+            explode_barrel(*barrel);
+            return;
+        }
+        if (Entity* other = entity_at(next, &target)) {
+            damage(target, 3, std::format("{} crashes into {}.", target.name, other->name));
+            damage(*other, 4);
+            apply_knockback(*other, dir, remaining - 1);
+            return;
+        }
+        if (map_.is_pit(next)) {
+            target.pos = next;
+            damage(target, 9999, std::format("{} falls into the pit!", target.name));
+            return;
+        }
+        if (map_.is_spikes(next)) {
+            target.pos = next;
+            damage(target, 5, std::format("{} is shoved onto the spikes.", target.name));
+            --remaining;
+            continue;
+        }
+        target.pos = next;
+        --remaining;
+    }
+}
+
+void Game::explode_barrel(Prop& barrel) {
+    if (!barrel.alive) return;
+    barrel.alive = false;
+    const Vec2 c = barrel.pos;
+    log("A barrel explodes!");
+
+    auto blast = [&](Entity& e) {
+        if ((&e != &player_ && !e.alive) || e.pos.chebyshev(c) > 2) return;
+        damage(e, 12);
+        if (e.alive) {
+            const Vec2 d = unit_dir(e.pos - c);
+            apply_knockback(e, (d.x == 0 && d.y == 0) ? Vec2{1, 0} : d, 2);
+        }
+    };
+    blast(player_);
+    for (auto& m : monsters_) blast(m);
+
+    // Chain to nearby barrels.
+    for (auto& pr : props_) {
+        if (pr.alive && pr.pos.chebyshev(c) <= 2) explode_barrel(pr);
+    }
+}
+
+void Game::enter_tile(Entity& e) {
+    if (map_.is_spikes(e.pos)) {
+        const char* verb = (&e == &player_) ? "step" : "steps";
+        damage(e, 4, std::format("{} {} on the spikes.", e.name, verb));
     }
 }
 
@@ -516,6 +657,12 @@ std::string Game::cell_str(Vec2 world) const {
             return ansi::bold + ansi::fg(c) + std::string{it.glyph};
         }
     }
+    // Barrel.
+    for (const auto& pr : props_) {
+        if (pr.alive && pr.pos == world) {
+            return ansi::bold + ansi::fg(ansi::scale(ansi::Rgb{198, 132, 70}, std::max(light, 0.8))) + "0";
+        }
+    }
 
     // Terrain.
     switch (t.type) {
@@ -523,6 +670,10 @@ std::string Game::cell_str(Vec2 world) const {
             return ansi::bold + ansi::fg(ansi::scale(kStairs, light)) + ">";
         case TileType::Wall:
             return ansi::fg(ansi::scale(kWallLit, light)) + kWallGlyph;
+        case TileType::Pit:
+            return ansi::fg(ansi::scale(ansi::Rgb{20, 22, 34}, light)) + "O";
+        case TileType::Spikes:
+            return ansi::fg(ansi::scale(ansi::Rgb{210, 90, 90}, light)) + "^";
         case TileType::Floor:
             break;
     }
@@ -703,10 +854,19 @@ std::string Game::ascii_snapshot() const {
                         case TileType::Wall:       ch = '#'; break;
                         case TileType::Floor:      ch = '.'; break;
                         case TileType::StairsDown: ch = '>'; break;
+                        case TileType::Pit:        ch = 'O'; break;
+                        case TileType::Spikes:     ch = '^'; break;
                     }
                 }
                 if (w == player_.pos) {
                     ch = '@';
+                } else if (const Prop* pr = [&]() -> const Prop* {
+                               for (const auto& p : props_)
+                                   if (p.alive && p.pos == w) return &p;
+                               return nullptr;
+                           }()) {
+                    (void)pr;
+                    ch = '0'; // barrel
                 } else {
                     for (const auto& m : monsters_) {
                         if (m.alive && m.pos == w) { ch = m.glyph; break; }
@@ -760,9 +920,11 @@ int Game::selftest() {
         bool cleared = false;
         while (turns++ < 1500 && state_ == State::Playing) {
             int key = '.';
+            std::vector<Vec2> blocked;
+            for (const auto& pr : props_) if (pr.alive) blocked.push_back(pr.pos);
             if (player_.pos == stairs_) {
                 key = '>';
-            } else if (const auto step = next_step_towards(map_, player_.pos, stairs_, {})) {
+            } else if (const auto step = next_step_towards(map_, player_.pos, stairs_, blocked)) {
                 key = dir_to_key(*step - player_.pos);
             }
 

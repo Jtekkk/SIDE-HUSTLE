@@ -292,9 +292,10 @@ struct Anim {
     std::vector<Vector2> monR;
     std::vector<int> monHp;
     std::vector<float> monPunch;       // white hit-flash per monster
+    std::vector<char> propAlive;       // barrel alive snapshot (to detect blasts)
     int prevHp = 0, prevCash = 0, prevLevel = 1, lastDepth = -1;
     float hpShown = 1.0f, xpShown = 0.0f, time = 0.0f;
-    float shake = 0.0f, playerPunch = 0.0f, playerLunge = 0.0f;
+    float shake = 0.0f, playerPunch = 0.0f, playerLunge = 0.0f, boom = 0.0f;
     Vector2 playerLungeDir{};
 };
 Vector2 tile_center(float wx, float wy, float camx, float camy) {
@@ -316,7 +317,9 @@ void sync_fx(const Game& g, Anim& a, float dt, float camx, float camy) {
         }
         a.playerR = {(float)g.player().pos.x, (float)g.player().pos.y};
         a.prevHp = g.player().combat.hp; a.prevCash = g.cash(); a.prevLevel = g.level();
-        a.shake = a.playerPunch = a.playerLunge = 0.0f;
+        a.shake = a.playerPunch = a.playerLunge = a.boom = 0.0f;
+        a.propAlive.assign(g.props().size(), 0);
+        for (std::size_t i = 0; i < g.props().size(); ++i) a.propAlive[i] = g.props()[i].alive ? 1 : 0;
         gParticles.clear(); gFloats.clear();
     } else {
         for (std::size_t i = 0; i < mons.size(); ++i) {
@@ -355,6 +358,19 @@ void sync_fx(const Game& g, Anim& a, float dt, float camx, float camy) {
             burst(psc, C(150, 240, 160), 36, 240.0f, 0.9f, 4.0f, false);
         }
         a.prevHp = g.player().combat.hp; a.prevCash = g.cash(); a.prevLevel = g.level();
+
+        // Barrel detonations -> big blast FX (sparks emit light, so it flashes).
+        for (std::size_t i = 0; i < g.props().size() && i < a.propAlive.size(); ++i) {
+            if (a.propAlive[i] && !g.props()[i].alive) {
+                a.propAlive[i] = 0;
+                const Vector2 sc = tile_center((float)g.props()[i].pos.x, (float)g.props()[i].pos.y, camx, camy);
+                burst(sc, C(255, 186, 84), 40, 320.0f, 0.8f, 5.0f, false);
+                burst(sc, C(255, 120, 40), 24, 220.0f, 0.7f, 4.0f, true);
+                add_float({sc.x, sc.y - 14}, "BOOM", C(255, 180, 90), 28);
+                a.boom = std::min(1.0f, a.boom + 0.9f);
+                a.shake = std::min(16.0f, a.shake + 9.0f);
+            }
+        }
     }
     const float k = std::min(1.0f, dt * 16.0f);
     a.playerR.x += ((float)g.player().pos.x - a.playerR.x) * k;
@@ -369,6 +385,7 @@ void sync_fx(const Game& g, Anim& a, float dt, float camx, float camy) {
     a.xpShown += (xpR - a.xpShown) * std::min(1.0f, dt * 6.0f);
 
     a.shake = std::max(0.0f, a.shake - dt * 26.0f);
+    a.boom = std::max(0.0f, a.boom - dt * 3.0f);
     a.playerPunch = std::max(0.0f, a.playerPunch - dt * 5.0f);
     a.playerLunge = std::max(0.0f, a.playerLunge - dt * 6.0f);
     for (auto& mp : a.monPunch) mp = std::max(0.0f, mp - dt * 5.0f);
@@ -382,6 +399,8 @@ double light_falloff(const Game& g, Vec2 w) {
     const double t01 = g.fov_radius() > 0 ? std::clamp(d / g.fov_radius(), 0.0, 1.0) : 0.0;
     return 1.0 - t01 * t01;
 }
+
+void shadow(Vector2 c); // defined with the entity helpers below
 
 void draw_terrain(const Game& g, Vec2 w, int px, int py) {
     using sh::TileType;
@@ -404,6 +423,15 @@ void draw_terrain(const Game& g, Vec2 w, int px, int py) {
         return;
     }
 
+    if (t.type == TileType::Pit) {
+        // a recessed dark chasm
+        DrawRectangle(px, py, kTile, kTile, C(9, 10, 16));
+        DrawRectangleGradientV(px, py, kTile, 12, C(3, 3, 6), C(9, 10, 16));
+        DrawEllipse(px + kTile / 2, py + kTile / 2 + 2, kTile * 0.36f, kTile * 0.31f, C(2, 2, 5));
+        DrawRectangle(px, py, kTile, 2, C(44, 42, 50)); // near rim
+        return;
+    }
+
     const float j = 0.9f + hash2(w.x * 3 + 1, w.y * 3 + 1) * 0.2f;
     const Rectangle src{0, 0, (float)gFloorTex.width, (float)gFloorTex.height};
     DrawTexturePro(gFloorTex, src, dest, {0, 0}, 0, C((int)(96 * j), (int)(92 * j), (int)(104 * j)));
@@ -422,7 +450,26 @@ void draw_terrain(const Game& g, Vec2 w, int px, int py) {
             DrawTriangle({(float)px + 11, yy}, {(float)px + kTile - 11, yy},
                          {(float)(px + kTile / 2), yy + 7}, C(255, 224, 120));
         }
+    } else if (t.type == TileType::Spikes) {
+        for (int i = 0; i < 3; ++i) {
+            const float bx = px + 7.0f + i * 9.0f;
+            const Vector2 a{bx, (float)(py + kTile - 8)}, b{bx + 8, (float)(py + kTile - 8)};
+            const Vector2 tip{bx + 4, (float)(py + 9)};
+            DrawTriangle(a, b, tip, C(168, 174, 186));
+            DrawLineEx(a, tip, 1.5f, C(214, 220, 230)); // lit edge
+        }
     }
+}
+
+void draw_barrel(Vector2 c) {
+    shadow(c);
+    const Rectangle body{c.x - kTile * 0.26f, c.y - kTile * 0.30f, kTile * 0.52f, kTile * 0.60f};
+    DrawRectangleRounded(body, 0.4f, 8, C(150, 96, 50));
+    DrawRectangleRounded({body.x, body.y, body.width * 0.45f, body.height}, 0.4f, 8, C(170, 112, 62)); // lit side
+    DrawRectangleRoundedLines(body, 0.4f, 8, C(88, 54, 28));
+    DrawRectangle((int)body.x, (int)(c.y - kTile * 0.15f), (int)body.width, 3, C(96, 96, 104)); // hoops
+    DrawRectangle((int)body.x, (int)(c.y + kTile * 0.10f), (int)body.width, 3, C(96, 96, 104));
+    DrawCircleV({c.x, c.y - kTile * 0.02f}, 3.5f, C(235, 180, 60)); // hazard mark
 }
 
 // ---- entities (albedo shapes; lights are added separately) -----------------
@@ -783,7 +830,7 @@ int main() {
     int smoke_frames = 0;
     if (const char* s = std::getenv("SH_SMOKE")) smoke_frames = std::atoi(s);
     int frame = 0;
-    bool combat_shot = false;
+    bool combat_shot = false, haz_shot = false, boom_shot = false;
 
     while (!WindowShouldClose()) {
         const float dt = GetFrameTime();
@@ -797,9 +844,11 @@ int main() {
             else if (phase == Phase::Playing && game) {
                 if (frame % 3 == 0) {
                     const Vec2 pp = game->player().pos;
+                    std::vector<Vec2> blk;
+                    for (const auto& pr : game->props()) if (pr.alive) blk.push_back(pr.pos);
                     Game::Command c = Game::Command::Wait;
                     if (pp == game->stairs()) c = Game::Command::Descend;
-                    else if (auto s = sh::next_step_towards(game->map(), pp, game->stairs(), {})) {
+                    else if (auto s = sh::next_step_towards(game->map(), pp, game->stairs(), blk)) {
                         c = dir_to_cmd({(s->x > pp.x) - (s->x < pp.x), (s->y > pp.y) - (s->y < pp.y)});
                     }
                     game->advance(c);
@@ -879,6 +928,10 @@ int main() {
                     if (!game->map().in_bounds(w) || !game->map().at(w).explored) continue;
                     draw_terrain(*game, w, sx(wx), sy(wy));
                 }
+            for (const auto& pr : game->props()) {
+                if (!pr.alive || !game->map().in_bounds(pr.pos) || !game->map().at(pr.pos).explored) continue;
+                draw_barrel(tile_center(pr.pos.x, pr.pos.y, camx, camy));
+            }
             for (const auto& it : game->items()) {
                 if (it.taken || !game->map().in_bounds(it.pos) || !game->map().at(it.pos).visible) continue;
                 draw_item(it, tile_center(it.pos.x, it.pos.y, camx, camy),
@@ -915,6 +968,9 @@ int main() {
             for (const auto& it : game->items())
                 if (!it.taken && game->map().in_bounds(it.pos) && game->map().at(it.pos).visible)
                     DrawCircleV(tile_center(it.pos.x, it.pos.y, camx, camy), kTile * 0.32f, C(128, 128, 255));
+            for (const auto& pr : game->props())
+                if (pr.alive && game->map().in_bounds(pr.pos) && game->map().at(pr.pos).explored)
+                    DrawCircleV(tile_center(pr.pos.x, pr.pos.y, camx, camy), kTile * 0.30f, C(128, 128, 255));
             for (std::size_t i = 0; i < game->monsters().size(); ++i) {
                 const auto& m = game->monsters()[i];
                 if (m.alive && game->map().in_bounds(m.pos) && game->map().at(m.pos).visible)
@@ -944,6 +1000,9 @@ int main() {
             }
             if (game->map().in_bounds(game->stairs()) && game->map().at(game->stairs()).visible)
                 add_light(tile_center(game->stairs().x, game->stairs().y, camx, camy), kTile * 1.3f, C(255, 220, 110), 0.45f);
+            for (const auto& pr : game->props())
+                if (pr.alive && game->map().in_bounds(pr.pos) && game->map().at(pr.pos).visible)
+                    add_light(tile_center(pr.pos.x, pr.pos.y, camx, camy), kTile * 0.7f, C(255, 168, 66), 0.22f);
             for (const auto& m : mons) {
                 if (m.alive && m.glyph == '&' && game->map().at(m.pos).visible)
                     add_light(tile_center(m.pos.x, m.pos.y, camx, camy), kTile * 1.5f, code_color(m.color), 0.45f);
@@ -1104,6 +1163,7 @@ int main() {
             rlPopMatrix();
             EndScissorMode();
             if (flash > 0.0f) DrawRectangle(0, 0, mapAreaW, H, Fade(C(200, 30, 30), 0.35f * flash));
+            if (anim.boom > 0.0f) DrawRectangle(0, 0, mapAreaW, H, Fade(C(255, 150, 50), 0.3f * anim.boom));
 
             draw_hud(*game, anim, mapAreaW, kHudW, H);
 
@@ -1133,6 +1193,22 @@ int main() {
             if (!combat_shot && phase == Phase::Playing && !gFloats.empty()) {
                 TakeScreenshot("sh_combat.png"); combat_shot = true;
             }
+            if (!haz_shot && phase == Phase::Playing && game) {
+                bool saw = false;
+                for (const auto& pr : game->props())
+                    if (pr.alive && game->map().in_bounds(pr.pos) && game->map().at(pr.pos).visible) { saw = true; break; }
+                const Vec2 pp = game->player().pos;
+                for (int dy = -3; dy <= 3 && !saw; ++dy)
+                    for (int dx = -3; dx <= 3 && !saw; ++dx) {
+                        const Vec2 w{pp.x + dx, pp.y + dy};
+                        if (game->map().in_bounds(w) && game->map().at(w).visible) {
+                            const auto tt = game->map().at(w).type;
+                            if (tt == sh::TileType::Pit || tt == sh::TileType::Spikes) saw = true;
+                        }
+                    }
+                if (saw) { TakeScreenshot("sh_haz.png"); haz_shot = true; }
+            }
+            if (!boom_shot && anim.boom > 0.45f) { TakeScreenshot("sh_boom.png"); boom_shot = true; }
             if (frame == smoke_frames - 1) TakeScreenshot("sh_final.png");
         }
         if (quit) break;
