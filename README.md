@@ -143,9 +143,12 @@ double-click it or run it from `cmd` / PowerShell. Use a modern terminal
 
 Movement is turn-based: every step you take, the monsters take one too. Walk
 into a monster to attack it. Find the `>` stairs on each floor to go deeper —
-but every third floor an **act boss (`&`) guards the stairs**, and on the
-**final floor the CEO (`&`) blocks the exit**, so you'll have to put each of
-them down to win (see [The descent](#the-descent--story--acts)).
+a **descent compass** (a gold arrow at the edge of the view, plus an `Exit (>)`
+bearing in the HUD like *"24 tiles SE"*) always points the way, so you never
+get lost on the big floors. But every third floor an **act boss (`&`) guards
+the stairs**, and on the **final floor the CEO (`&`) blocks the exit**, so
+you'll have to put each of them down to win
+(see [The descent](#the-descent--story--acts)).
 
 ### Command-line flags
 

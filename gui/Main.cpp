@@ -700,6 +700,7 @@ void draw_hud(const Game& g, const Anim& a, int x, int w, int h) {
          g.dash_cd() == 0 ? C(120, 225, 235) : C(120, 128, 150));
     stat("Slam", g.slam_cd() == 0 ? "READY  (X)" : TextFormat("%d turns", g.slam_cd()),
          g.slam_cd() == 0 ? C(255, 215, 150) : C(120, 128, 150));
+    stat("Exit (>)", g.exit_bearing().c_str(), C(255, 224, 120));
     y += 8;
     DrawLine(ix, y, x + w - 22, y, C(54, 58, 78)); y += 14;
     dt("LOG", ix, y, 16, C(150, 162, 190)); y += 24;
@@ -1325,6 +1326,34 @@ int main() {
             EndScissorMode();
             if (flash > 0.0f) DrawRectangle(0, 0, mapAreaW, H, Fade(C(200, 30, 30), 0.35f * flash));
             if (anim.boom > 0.0f) DrawRectangle(0, 0, mapAreaW, H, Fade(C(255, 150, 50), 0.3f * anim.boom));
+
+            // Descent compass: a gold arrow that points to the exit stairs
+            // whenever they're off the current view, so you never get lost.
+            if (game->is_playing()) {
+                const Vec2 st = game->stairs();
+                const Vector2 sc = tile_center((float)st.x, (float)st.y, camx, camy);
+                const float margin = 48.0f;
+                const bool off = sc.x < margin || sc.x > mapAreaW - margin ||
+                                 sc.y < margin || sc.y > H - margin;
+                if (off) {
+                    const float ax = std::clamp(sc.x, margin, (float)mapAreaW - margin);
+                    const float ay = std::clamp(sc.y, margin, (float)H - margin);
+                    const Vector2 pc = tile_center(anim.playerR.x, anim.playerR.y, camx, camy);
+                    const float ang = std::atan2(sc.y - pc.y, sc.x - pc.x);
+                    const float pulse = 0.65f + 0.35f * std::sin(anim.time * 4.5f);
+                    const Color gold = C(255, 224, 120);
+                    DrawCircleV({ax, ay}, 21.0f, Fade(C(0, 0, 0), 0.4f));
+                    DrawCircleV({ax, ay}, 18.0f, Fade(gold, 0.12f * pulse));
+                    const float hd = 15.0f;
+                    const Vector2 tip{ax + std::cos(ang) * hd, ay + std::sin(ang) * hd};
+                    const Vector2 wl{ax + std::cos(ang + 2.5f) * hd, ay + std::sin(ang + 2.5f) * hd};
+                    const Vector2 wr{ax + std::cos(ang - 2.5f) * hd, ay + std::sin(ang - 2.5f) * hd};
+                    const Vector2 tail{ax - std::cos(ang) * hd, ay - std::sin(ang) * hd};
+                    DrawLineEx(tail, tip, 4.0f, Fade(gold, pulse));
+                    DrawLineEx(wl, tip, 4.0f, Fade(gold, pulse));
+                    DrawLineEx(wr, tip, 4.0f, Fade(gold, pulse));
+                }
+            }
 
             draw_hud(*game, anim, mapAreaW, kHudW, H);
 

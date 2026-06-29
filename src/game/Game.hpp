@@ -62,6 +62,9 @@ public:
     [[nodiscard]] const std::vector<Prop>& props() const { return props_; }
     [[nodiscard]] const std::vector<Projectile>& projectiles() const { return projectiles_; }
     [[nodiscard]] Vec2 stairs() const { return stairs_; }
+    // Manhattan distance + 8-way compass bearing from the player to the exit
+    // stairs, e.g. "24 tiles SE" — a wayfinding hint for both front-ends.
+    [[nodiscard]] std::string exit_bearing() const;
     [[nodiscard]] int depth() const { return depth_; }
     [[nodiscard]] int max_depth() const { return kMaxDepth; }
     [[nodiscard]] const char* zone_name() const { return story::act_for(depth_).name; }

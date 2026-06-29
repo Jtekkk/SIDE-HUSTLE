@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <format>
@@ -840,6 +841,19 @@ void Game::player_gain_xp(int xp) {
     }
 }
 
+std::string Game::exit_bearing() const {
+    const Vec2 d{stairs_.x - player_.pos.x, stairs_.y - player_.pos.y};
+    const int dist = std::abs(d.x) + std::abs(d.y);
+    if (dist == 0) return "on the stairs - press > / Enter";
+    // Octants, y growing downward: 0=E, then clockwise SE,S,SW,W,NW,N,NE.
+    static const char* const dirs[8] = {"E", "SE", "S", "SW", "W", "NW", "N", "NE"};
+    constexpr double kPi = 3.14159265358979323846;
+    const double ang = std::atan2(static_cast<double>(d.y), static_cast<double>(d.x));
+    int oct = static_cast<int>(std::lround(ang / (kPi / 4.0)));
+    oct = ((oct % 8) + 8) % 8;
+    return std::format("{} tiles {}", dist, dirs[oct]);
+}
+
 void Game::descend() {
     if (depth_ >= kMaxDepth) {
         state_ = State::Won;
@@ -1068,6 +1082,10 @@ std::string Game::hud_str() const {
     s += ansi::fg(label) + "slam " +
          ansi::fg(slam_cd_ == 0 ? ready : dim) + (slam_cd_ == 0 ? std::string{"rdy"} : std::format("{}", slam_cd_));
     s += std::string{ansi::reset} + "\r\n";
+
+    // Exit compass: which way to the stairs, and how far.
+    s += " " + ansi::fg(label) + "Exit (>) " + ansi::fg(kStairs) + exit_bearing()
+       + std::string{ansi::reset} + "\r\n";
 
     // Message log (latest brightest).
     s += "\r\n";
