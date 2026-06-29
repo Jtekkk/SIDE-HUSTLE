@@ -30,6 +30,7 @@
 #include "rlgl.h"
 
 #include "AssetFont.h"
+#include "Controls.hpp"
 #include "game/Game.hpp"
 #include "game/Scores.hpp"
 #include "world/Pathfinding.hpp"
@@ -672,7 +673,7 @@ std::vector<std::string> wrap_text(const std::string& s, int max_w, float size) 
     if (out.empty()) out.push_back("");
     return out;
 }
-void draw_hud(const Game& g, const Anim& a, int x, int w, int h) {
+void draw_hud(const Game& g, const Anim& a, int x, int w, int h, const ctrl::Map& keys) {
     BeginScissorMode(x, 0, w, h);
     DrawRectangleGradientV(x, 0, w, h, C(26, 28, 40), C(18, 19, 28));
     DrawRectangle(x, 0, 2, h, C(70, 76, 98));
@@ -730,10 +731,20 @@ void draw_hud(const Game& g, const Anim& a, int x, int w, int h) {
     int cy = h - 86;
     DrawLine(ix, cy - 12, x + w - 22, cy - 12, C(54, 58, 78));
     const Color hc = C(120, 128, 150);
-    dt("Move WASD/Arrows/HJKL   Diag YUBN", ix, cy, 14, hc);
-    dt("Shove Shift+dir   Dash Ctrl+dir   Slam X", ix, cy + 19, 14, hc);
-    dt("Coffee E   Wait .   Descend Enter   Quit Q", ix, cy + 38, 14, hc);
-    dt(gMuted ? "Music M (muted)" : "Music M", ix, cy + 57, 14, gMuted ? C(150, 96, 96) : hc);
+    auto kn = [&](ctrl::Act a) { return ctrl::key_name(keys[a].key); };
+    dt(TextFormat("Move %s%s%s%s + stick/dpad   Diag: two at once",
+                  kn(ctrl::Act::MoveUp).c_str(), kn(ctrl::Act::MoveLeft).c_str(),
+                  kn(ctrl::Act::MoveDown).c_str(), kn(ctrl::Act::MoveRight).c_str()),
+       ix, cy, 14, hc);
+    dt(TextFormat("Shove %s   Dash %s   Slam %s", kn(ctrl::Act::Shove).c_str(),
+                  kn(ctrl::Act::Dash).c_str(), kn(ctrl::Act::Slam).c_str()),
+       ix, cy + 19, 14, hc);
+    dt(TextFormat("Coffee %s   Wait %s   Descend %s   Quit %s", kn(ctrl::Act::Coffee).c_str(),
+                  kn(ctrl::Act::Wait).c_str(), kn(ctrl::Act::Descend).c_str(), kn(ctrl::Act::Quit).c_str()),
+       ix, cy + 38, 14, hc);
+    dt(gMuted ? TextFormat("Music %s (muted)", kn(ctrl::Act::Mute).c_str())
+              : TextFormat("Music %s   (remap on title: C)", kn(ctrl::Act::Mute).c_str()),
+       ix, cy + 57, 14, gMuted ? C(150, 96, 96) : hc);
     EndScissorMode();
 }
 void draw_scoreboard(const sh::HighScores& hs, int cx, int y) {
@@ -751,18 +762,6 @@ void draw_scoreboard(const sh::HighScores& hs, int cx, int y) {
 }
 
 // ---- input -----------------------------------------------------------------
-Vec2 movement_dir() {
-    Vec2 d{0, 0};
-    if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A) || IsKeyDown(KEY_H)) d.x = -1;
-    if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D) || IsKeyDown(KEY_L)) d.x = 1;
-    if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W) || IsKeyDown(KEY_K)) d.y = -1;
-    if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S) || IsKeyDown(KEY_J)) d.y = 1;
-    if (IsKeyDown(KEY_Y)) d = {-1, -1};
-    if (IsKeyDown(KEY_U)) d = {1, -1};
-    if (IsKeyDown(KEY_B)) d = {-1, 1};
-    if (IsKeyDown(KEY_N)) d = {1, 1};
-    return d;
-}
 Game::Command dir_to_cmd(Vec2 d) {
     if (d.x < 0 && d.y < 0) return Game::Command::MoveNW;
     if (d.x > 0 && d.y < 0) return Game::Command::MoveNE;
@@ -798,6 +797,23 @@ Game::Command dash_to_cmd(Vec2 d) {
 }
 bool is_dash_cmd(Game::Command c) {
     return c >= Game::Command::DashW && c <= Game::Command::DashSE;
+}
+
+// Movement direction from the current bindings: cardinal actions combine into
+// diagonals, and the left analog stick always contributes 8-way movement.
+Vec2 bound_move_dir(const ctrl::Map& keys) {
+    Vec2 d{0, 0};
+    if (ctrl::down(keys, ctrl::Act::MoveLeft))  d.x = -1;
+    if (ctrl::down(keys, ctrl::Act::MoveRight)) d.x = 1;
+    if (ctrl::down(keys, ctrl::Act::MoveUp))    d.y = -1;
+    if (ctrl::down(keys, ctrl::Act::MoveDown))  d.y = 1;
+    if (IsGamepadAvailable(0)) {
+        const float ax = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
+        const float ay = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_Y);
+        if (ax < -0.5f) d.x = -1; else if (ax > 0.5f) d.x = 1;
+        if (ay < -0.5f) d.y = -1; else if (ay > 0.5f) d.y = 1;
+    }
+    return d;
 }
 
 // ---- procedural textures & render targets ----------------------------------
@@ -916,7 +932,7 @@ int main() {
     gLocPostRes = GetShaderLocation(gPost, "res");
     gLocPostTime = GetShaderLocation(gPost, "time");
 
-    enum class Phase { Title, Playing, End };
+    enum class Phase { Title, Playing, End, Controls };
     Phase phase = Phase::Title;
     int diff_index = 1;
     const sh::Difficulty diffs[3] = {sh::Difficulty::Easy, sh::Difficulty::Normal, sh::Difficulty::Hard};
@@ -927,6 +943,14 @@ int main() {
     std::unique_ptr<Game> game;
     Anim anim;
     float move_timer = 0.0f, flash = 0.0f;
+
+    // Remappable controls (keyboard + gamepad), loaded from disk if present.
+    const std::string controls_path = "side-hustle-controls.txt";
+    ctrl::Map keys = ctrl::defaults();
+    ctrl::load(keys, controls_path.c_str());
+    int ctl_row = 0;          // selected action row in the Controls menu
+    int ctl_col = 0;          // 0 = keyboard column, 1 = gamepad column
+    bool ctl_capture = false; // waiting to capture the next input for (row,col)
 
     auto start_game = [&]() {
         sh::Config cfg;
@@ -975,10 +999,12 @@ int main() {
         bool quit = false;
         bool pending_slam = false, pending_dash = false;
 
-        // Music: M toggles mute; the menu and the dungeon get different tracks.
+        // Music: the Mute action toggles it; menu and dungeon get different
+        // tracks. Don't toggle while rebinding (that keypress is being captured).
         if (audio_ok) {
-            if (IsKeyPressed(KEY_M)) gMuted = !gMuted;
-            Music* want = gMuted ? nullptr : (phase == Phase::Title ? &musTitle : &musPlay);
+            if (!ctl_capture && ctrl::pressed(keys, ctrl::Act::Mute)) gMuted = !gMuted;
+            const bool inMenu = (phase == Phase::Title || phase == Phase::Controls);
+            Music* want = gMuted ? nullptr : (inMenu ? &musTitle : &musPlay);
             if (want != curMusic) {
                 if (curMusic) StopMusicStream(*curMusic);
                 if (want) PlayMusicStream(*want);
@@ -988,7 +1014,11 @@ int main() {
         }
 
         if (smoke_frames > 0) {
-            if (frame == 2 && phase == Phase::Title) start_game();
+            if (frame == 2 && phase == Phase::Title && std::getenv("SH_CONTROLS")) {
+                phase = Phase::Controls; ctl_row = 6; // sit on "Slam" for the shot
+            } else if (frame == 4 && phase == Phase::Controls) {
+                TakeScreenshot("sh_controls.png");
+            } else if (frame == 2 && phase == Phase::Title) start_game();
             else if (phase == Phase::Playing && game) {
                 if (frame % 3 == 0) {
                     const Vec2 pp = game->player().pos;
@@ -1014,23 +1044,82 @@ int main() {
         }
 
         if (phase == Phase::Title) {
+            const bool padA = IsGamepadAvailable(0) && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+            const bool padNav = IsGamepadAvailable(0);
             if (IsKeyPressed(KEY_ONE)) diff_index = 0;
             if (IsKeyPressed(KEY_TWO)) diff_index = 1;
             if (IsKeyPressed(KEY_THREE)) diff_index = 2;
-            if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) diff_index = (diff_index + 2) % 3;
-            if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) diff_index = (diff_index + 1) % 3;
-            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) start_game();
+            if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A) ||
+                (padNav && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT)))
+                diff_index = (diff_index + 2) % 3;
+            if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D) ||
+                (padNav && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT)))
+                diff_index = (diff_index + 1) % 3;
+            if (IsKeyPressed(KEY_C) ||
+                (padNav && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_UP))) {
+                phase = Phase::Controls; ctl_row = 0; ctl_col = 0; ctl_capture = false;
+            }
+            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) || padA) start_game();
             if (IsKeyPressed(KEY_Q)) quit = true;
+        } else if (phase == Phase::Controls) {
+            // Rows 0..kCount-1 are actions; the last row is "Reset to defaults".
+            const int rows = ctrl::kCount + 1;
+            const bool padNav = IsGamepadAvailable(0);
+            if (ctl_capture) {
+                // Capture the next key (keyboard column) or button (gamepad col).
+                if (IsKeyPressed(KEY_ESCAPE)) {
+                    ctl_capture = false;
+                } else if (ctl_col == 0) {
+                    const int k = GetKeyPressed();
+                    if (k == KEY_BACKSPACE || k == KEY_DELETE) {
+                        keys.b[ctl_row].key = 0; ctl_capture = false; ctrl::save(keys, controls_path.c_str());
+                    } else if (k > 0) {
+                        keys.b[ctl_row].key = k; ctl_capture = false; ctrl::save(keys, controls_path.c_str());
+                    }
+                } else {
+                    if (IsKeyPressed(KEY_BACKSPACE) || IsKeyPressed(KEY_DELETE)) {
+                        keys.b[ctl_row].pad = 0; ctl_capture = false; ctrl::save(keys, controls_path.c_str());
+                    } else if (const int btn = ctrl::any_pad_pressed()) {
+                        keys.b[ctl_row].pad = btn; ctl_capture = false; ctrl::save(keys, controls_path.c_str());
+                    }
+                }
+            } else {
+                if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W) ||
+                    (padNav && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_UP)))
+                    ctl_row = (ctl_row + rows - 1) % rows;
+                if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S) ||
+                    (padNav && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN)))
+                    ctl_row = (ctl_row + 1) % rows;
+                if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_A) || IsKeyPressed(KEY_D) ||
+                    (padNav && (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT) ||
+                                IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))))
+                    ctl_col ^= 1;
+                const bool confirm = IsKeyPressed(KEY_ENTER) ||
+                    (padNav && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN));
+                if (confirm) {
+                    if (ctl_row == ctrl::kCount) { keys = ctrl::defaults(); ctrl::save(keys, controls_path.c_str()); }
+                    else ctl_capture = true;
+                }
+                if (IsKeyPressed(KEY_BACKSPACE) || IsKeyPressed(KEY_DELETE)) {
+                    if (ctl_row < ctrl::kCount) {
+                        if (ctl_col == 0) keys.b[ctl_row].key = 0; else keys.b[ctl_row].pad = 0;
+                        ctrl::save(keys, controls_path.c_str());
+                    }
+                }
+                if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_C) ||
+                    (padNav && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)))
+                    phase = Phase::Title;
+            }
         } else if (phase == Phase::Playing && game && smoke_frames == 0) {
             Game::Command cmd = Game::Command::None;
-            if (IsKeyPressed(KEY_E)) cmd = Game::Command::UseCoffee;
-            else if (IsKeyPressed(KEY_X)) cmd = Game::Command::Slam; // ground-pound
-            else if (IsKeyPressed(KEY_ENTER)) cmd = Game::Command::Descend;
-            else if (IsKeyPressed(KEY_PERIOD) || IsKeyPressed(KEY_SPACE)) cmd = Game::Command::Wait;
+            if (ctrl::pressed(keys, ctrl::Act::Coffee)) cmd = Game::Command::UseCoffee;
+            else if (ctrl::pressed(keys, ctrl::Act::Slam)) cmd = Game::Command::Slam;
+            else if (ctrl::pressed(keys, ctrl::Act::Descend)) cmd = Game::Command::Descend;
+            else if (ctrl::pressed(keys, ctrl::Act::Wait)) cmd = Game::Command::Wait;
             else {
-                const Vec2 d = movement_dir();
-                const bool shoving = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-                const bool dashing = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+                const Vec2 d = bound_move_dir(keys);
+                const bool shoving = ctrl::down(keys, ctrl::Act::Shove);
+                const bool dashing = ctrl::down(keys, ctrl::Act::Dash);
                 move_timer -= dt;
                 if (d.x == 0 && d.y == 0) move_timer = 0.0f;
                 else if (move_timer <= 0.0f) {
@@ -1038,7 +1127,7 @@ int main() {
                     move_timer = kMoveRepeat;
                 }
             }
-            if (IsKeyPressed(KEY_Q)) quit = true;
+            if (ctrl::pressed(keys, ctrl::Act::Quit)) quit = true;
             const int before = game->player().combat.hp;
             const bool acted = (cmd != Game::Command::None) && game->advance(cmd);
             if (acted && cmd == Game::Command::Slam) pending_slam = true;
@@ -1046,7 +1135,8 @@ int main() {
             if (game->player().combat.hp < before) flash = std::min(1.0f, flash + 0.55f);
             if (!game->is_playing()) { board.load(); phase = Phase::End; }
         } else if (phase == Phase::End) {
-            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) phase = Phase::Title;
+            const bool padA = IsGamepadAvailable(0) && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) || padA) phase = Phase::Title;
             if (IsKeyPressed(KEY_Q)) quit = true;
         }
         flash = std::max(0.0f, flash - dt * 2.4f);
@@ -1322,7 +1412,48 @@ int main() {
             }
             dtc("1 / 2 / 3 or arrows to choose difficulty", cx, by + 66, 17, C(110, 120, 145));
             draw_scoreboard(board, cx, H / 2 + 40);
-            dtcsh("Press  ENTER  to start        Q to quit", cx, H - 64, 24, C(230, 235, 245));
+            dtcsh("Press  ENTER  to start    C  controls    Q  quit", cx, H - 64, 24, C(230, 235, 245));
+            const bool pad = IsGamepadAvailable(0);
+            dtc(pad ? TextFormat("Controller: %s", GetGamepadName(0)) : "Controller: none (keyboard + mouse)",
+                cx, H - 32, 16, pad ? C(120, 210, 140) : C(110, 120, 145));
+        } else if (phase == Phase::Controls) {
+            DrawRectangle(0, 0, W, H, C(16, 17, 26));
+            const int cx = W / 2;
+            dtcsh("CONTROLS", cx, 40, 56, C(255, 224, 130));
+            dtc("Enter / A  rebind     <- ->  keyboard / gamepad     Bksp  clear     Esc / B  back",
+                cx, 108, 17, C(140, 150, 175));
+            const bool pad = IsGamepadAvailable(0);
+            dtc(pad ? TextFormat("Controller connected: %s", GetGamepadName(0))
+                    : "No controller detected - plug in an Xbox pad and it'll be picked up live",
+                cx, 134, 16, pad ? C(120, 210, 140) : C(150, 120, 120));
+            const int x0 = cx - 330, colK = cx + 70, colP = cx + 250;
+            int ry = 178;
+            const int rowH = 33;
+            ::dt("ACTION", x0, ry, 18, C(120, 128, 150));
+            ::dt("KEYBOARD", colK, ry, 18, C(120, 128, 150));
+            ::dt("GAMEPAD", colP, ry, 18, C(120, 128, 150));
+            ry += 28;
+            for (int i = 0; i < ctrl::kCount; ++i) {
+                const bool selRow = (ctl_row == i);
+                const Color base = selRow ? C(255, 226, 120) : C(206, 212, 226);
+                if (selRow) DrawRectangleRounded({(float)x0 - 12, (float)ry - 4, 690, 28}, 0.4f, 6, C(44, 48, 66));
+                ::dt(ctrl::action_name(static_cast<ctrl::Act>(i)), x0, ry, 19, base);
+                const bool capK = ctl_capture && selRow && ctl_col == 0;
+                const bool capP = ctl_capture && selRow && ctl_col == 1;
+                const Color kc = (selRow && ctl_col == 0) ? C(255, 240, 170) : C(170, 178, 198);
+                const Color pc = (selRow && ctl_col == 1) ? C(255, 240, 170) : C(170, 178, 198);
+                ::dt(capK ? "press a key..." : ctrl::key_name(keys.b[i].key).c_str(), colK, ry, 19,
+                     capK ? C(120, 220, 235) : kc);
+                ::dt(capP ? "press a button..." : ctrl::pad_name(keys.b[i].pad).c_str(), colP, ry, 19,
+                     capP ? C(120, 220, 235) : pc);
+                ry += rowH;
+            }
+            ry += 6;
+            const bool selReset = (ctl_row == ctrl::kCount);
+            if (selReset) DrawRectangleRounded({(float)x0 - 12, (float)ry - 4, 690, 28}, 0.4f, 6, C(44, 48, 66));
+            ::dt("Reset to defaults", x0, ry, 19, selReset ? C(255, 180, 120) : C(200, 150, 120));
+            dtc("Diagonals = two cardinals at once. The left stick always moves 8-way.",
+                cx, H - 56, 16, C(110, 120, 145));
         } else if (game) {
             const float sx = (frand() * 2.0f - 1.0f) * anim.shake;
             const float sy = (frand() * 2.0f - 1.0f) * anim.shake;
@@ -1396,7 +1527,7 @@ int main() {
                 }
             }
 
-            draw_hud(*game, anim, mapAreaW, kHudW, H);
+            draw_hud(*game, anim, mapAreaW, kHudW, H, keys);
 
             if (phase == Phase::End) {
                 DrawRectangle(0, 0, W, H, Fade(BLACK, 0.74f));

@@ -147,6 +147,35 @@ double-click it or run it from `cmd` / PowerShell. Use a modern terminal
 | `>` | Descend the stairs (when standing on `>`) |
 | `q` | Quit |
 
+The table above is the **default** keyboard scheme; the GUI's keys and buttons
+are all **remappable** (see below).
+
+### Gamepad & remappable controls (GUI)
+
+The graphical version has full **controller support** — plug in an Xbox pad (or
+any XInput/SDL-recognised gamepad) and it's picked up live. The default scheme:
+
+| | Keyboard | Gamepad (Xbox) |
+|---|---|---|
+| Move | `W A S D` + left stick / dpad | left stick (8-way) or dpad |
+| Diagonal | two cardinals at once | left stick |
+| Shove (hold) | `L.Shift` | `LB` |
+| Dash (hold) | `L.Ctrl` | `RB` |
+| Slam | `X` | `Y` |
+| Drink coffee | `E` | `X` |
+| Wait | `.` | `B` |
+| Descend | `Enter` | `A` |
+| Mute music | `M` | `View` |
+| Quit | `Q` | `Menu` |
+
+Press **`C`** on the title screen to open the **Controls** menu and rebind any
+action to **any key or any gamepad button** (`Enter`/`A` to rebind, `←`/`→` to
+switch the keyboard/gamepad column, `Bksp` to clear, `Esc`/`B` to go back, or
+*Reset to defaults*). Your bindings persist to a local
+`side-hustle-controls.txt`. Diagonal movement is always available by pressing
+two cardinals together, and the left analog stick always moves 8-way, so those
+need no binding.
+
 Movement is turn-based: every step you take, the monsters take one too. Walk
 into a monster to attack it. Find the `>` stairs on each floor to go deeper —
 a **descent compass** (a gold arrow at the edge of the view, plus an `Exit (>)`

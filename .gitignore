@@ -15,6 +15,7 @@ sh_*.png
 
 # Runtime data
 side-hustle-scores.txt
+side-hustle-controls.txt
 
 # Editor / OS noise
 .vscode/
