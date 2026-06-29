@@ -92,8 +92,13 @@ The renderer is a small **deferred-style 2D lighting pipeline** with GLSL shader
   with outlines and eyes. The cyan hero is hue-separated from gold loot and warm
   enemies for instant readability.
 
-The GUI build links **raylib statically** and embeds its font, so on Windows it's
-a single self-contained `.exe` (no DLLs, no asset files). raylib's prebuilt
+**Background music** — two original OGG tracks (one for the menu, one for the
+dungeon) are embedded straight into the binary via `.incbin`
+(`gui/music_data.S`) and streamed from memory, so they ship inside the single
+file too; press **`m`** to mute.
+
+The GUI build links **raylib statically** and embeds its font and music, so on
+Windows it's a single self-contained `.exe` (no DLLs, no asset files). raylib's prebuilt
 static libs aren't committed — fetch them once, then build:
 
 ```sh
@@ -137,6 +142,7 @@ double-click it or run it from `cmd` / PowerShell. Use a modern terminal
 | **Ctrl + direction** (GUI) / **`Z` + direction** (terminal) | **Dash** — lunge up to 3 tiles (cooldown), close gaps or escape |
 | **`x`** | **Slam** — ground-pound: AoE knockback + stun to everything adjacent (cooldown) |
 | `e` | Drink a coffee (heals, if you're carrying one) |
+| `m` | Mute / unmute the music (GUI) |
 | `.` or space | Wait a turn |
 | `>` | Descend the stairs (when standing on `>`) |
 | `q` | Quit |

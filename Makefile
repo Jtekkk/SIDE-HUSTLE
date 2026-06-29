@@ -25,6 +25,8 @@ WINBIN   := side-hustle.exe
 # terminal entry point, plus the raylib main.
 RAY_INC  := third_party/raylib/include
 GUI_SRC  := gui/Main.cpp $(filter-out src/main.cpp,$(SRC))
+# Background music (OGG) embedded via .incbin -> single self-contained binary.
+GUI_MUSIC := gui/music_data.S
 GUI_BIN  := side-hustle-gui
 GUI_WIN  := side-hustle-gui.exe
 LINUX_GL := -lraylib -lGL -lX11 -lXrandr -lXinerama -lXi -lXcursor -lm -lpthread -ldl -lrt
@@ -45,10 +47,10 @@ $(WINBIN): $(SRC)
 	$(WINCXX) $(WINFLAGS) -o $@ $(SRC)
 
 gui:
-	$(CXX) $(CXXFLAGS) -I$(RAY_INC) $(GUI_SRC) -Lthird_party/raylib/lib/linux $(LINUX_GL) -o $(GUI_BIN)
+	$(CXX) $(CXXFLAGS) -I$(RAY_INC) $(GUI_SRC) $(GUI_MUSIC) -Lthird_party/raylib/lib/linux $(LINUX_GL) -o $(GUI_BIN)
 
 windows-gui:
-	$(WINCXX) $(WINFLAGS) -I$(RAY_INC) $(GUI_SRC) -Lthird_party/raylib/lib/win64 $(WIN_GL) -mwindows -o $(GUI_WIN)
+	$(WINCXX) $(WINFLAGS) -I$(RAY_INC) $(GUI_SRC) $(GUI_MUSIC) -Lthird_party/raylib/lib/win64 $(WIN_GL) -mwindows -o $(GUI_WIN)
 
 run: $(BIN)
 	./$(BIN)

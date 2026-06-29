@@ -174,6 +174,7 @@ void main() {
 // ===========================================================================
 Font gFont{};
 Texture2D gFloorTex{}, gWallTex{}, gLightTex{}, gFloorNrm{}, gWallNrm{};
+bool gMuted = false; // background-music mute, toggled with M; shown in the HUD
 Shader gComposite{}, gBlur{}, gPost{}, gGod{};
 int gLocLightTex = 0, gLocAmbient = 0, gLocDir = 0;
 int gLocPostRes = 0, gLocPostTime = 0;
@@ -732,6 +733,7 @@ void draw_hud(const Game& g, const Anim& a, int x, int w, int h) {
     dt("Move WASD/Arrows/HJKL   Diag YUBN", ix, cy, 14, hc);
     dt("Shove Shift+dir   Dash Ctrl+dir   Slam X", ix, cy + 19, 14, hc);
     dt("Coffee E   Wait .   Descend Enter   Quit Q", ix, cy + 38, 14, hc);
+    dt(gMuted ? "Music M (muted)" : "Music M", ix, cy + 57, 14, gMuted ? C(150, 96, 96) : hc);
     EndScissorMode();
 }
 void draw_scoreboard(const sh::HighScores& hs, int cx, int y) {
@@ -875,6 +877,13 @@ void ensure_targets(int w, int h) {
 
 } // namespace
 
+// Background music tracks, embedded via gui/music_data.S (.incbin). Track 1
+// scores the title/menu; track 2 scores the dungeon crawl.
+extern "C" const unsigned char sh_track1_ogg[];
+extern "C" const unsigned char sh_track1_ogg_end[];
+extern "C" const unsigned char sh_track2_ogg[];
+extern "C" const unsigned char sh_track2_ogg_end[];
+
 int main() {
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     SetTraceLogLevel(LOG_WARNING);
@@ -938,6 +947,26 @@ int main() {
     int frame = 0;
     bool combat_shot = false, haz_shot = false, boom_shot = false;
 
+    // Background music. Skipped under the headless smoke test (no audio device
+    // in the CI container) and degrades gracefully if the device won't open.
+    bool audio_ok = false;
+    Music musTitle{}, musPlay{};
+    Music* curMusic = nullptr;
+    if (smoke_frames == 0 && std::getenv("SH_NOAUDIO") == nullptr) {
+        InitAudioDevice();
+        audio_ok = IsAudioDeviceReady();
+        if (audio_ok) {
+            musTitle = LoadMusicStreamFromMemory(".ogg", sh_track1_ogg,
+                                                 (int)(sh_track1_ogg_end - sh_track1_ogg));
+            musPlay = LoadMusicStreamFromMemory(".ogg", sh_track2_ogg,
+                                                (int)(sh_track2_ogg_end - sh_track2_ogg));
+            musTitle.looping = true;
+            musPlay.looping = true;
+            SetMusicVolume(musTitle, 0.55f);
+            SetMusicVolume(musPlay, 0.55f);
+        }
+    }
+
     while (!WindowShouldClose()) {
         const float dt = GetFrameTime();
         const int W = GetScreenWidth(), H = GetScreenHeight();
@@ -945,6 +974,18 @@ int main() {
         a_time_rot_v += dt * 18.0f;
         bool quit = false;
         bool pending_slam = false, pending_dash = false;
+
+        // Music: M toggles mute; the menu and the dungeon get different tracks.
+        if (audio_ok) {
+            if (IsKeyPressed(KEY_M)) gMuted = !gMuted;
+            Music* want = gMuted ? nullptr : (phase == Phase::Title ? &musTitle : &musPlay);
+            if (want != curMusic) {
+                if (curMusic) StopMusicStream(*curMusic);
+                if (want) PlayMusicStream(*want);
+                curMusic = want;
+            }
+            if (curMusic) UpdateMusicStream(*curMusic);
+        }
 
         if (smoke_frames > 0) {
             if (frame == 2 && phase == Phase::Title) start_game();
@@ -1439,6 +1480,12 @@ int main() {
     UnloadTexture(gFloorTex); UnloadTexture(gWallTex); UnloadTexture(gLightTex);
     UnloadTexture(gFloorNrm); UnloadTexture(gWallNrm);
     UnloadFont(gFont);
+    if (audio_ok) {
+        if (curMusic) StopMusicStream(*curMusic);
+        UnloadMusicStream(musTitle);
+        UnloadMusicStream(musPlay);
+        CloseAudioDevice();
+    }
     CloseWindow();
     return 0;
 }
